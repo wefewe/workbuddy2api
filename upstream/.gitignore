@@ -44,4 +44,6 @@ PLAN.md
 SPEC.md
 docs/
 
-# 注意：本仓库为源码镜像，不移除 *.md（defaultprompt.md 为 go:embed 所需）
+# 设计/计划文档（但 README.md 必须进版本库）
+*.md
+!README.md
