@@ -1,0 +1,31 @@
+name: Keepalive
+
+# GitHub 会在仓库连续 60 天无提交后自动停用其定时 workflow（含本仓的 sync/build 定时任务）。
+# 本 workflow 每月 1 号产生一次提交，重置该计时器，保证自动更新链长期存活。
+on:
+  schedule:
+    - cron: '23 5 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Touch keepalive file
+        run: |
+          set -euo pipefail
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .keepalive
+            git commit -m "chore: keepalive"
+            git push
+            echo "✅ keepalive commit pushed"
+          else
+            echo "no change"
+          fi

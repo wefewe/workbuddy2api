@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write   # 同步后显式 dispatch build.yml（workflow_dispatch 不受 GITHUB_TOKEN 触发限制）
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -34,6 +35,8 @@ jobs:
           echo "$url" > upstream/UPSTREAM-SRC.txt
 
       - name: Commit if changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [ -n "$(git status --porcelain)" ]; then
@@ -43,6 +46,7 @@ jobs:
             git commit -m "chore: sync upstream from workbuddy-manager release"
             git push
             echo "✅ upstream updated and pushed"
+            gh workflow run build.yml --repo "$GITHUB_REPOSITORY"
           else
             echo "✅ upstream already up to date"
           fi
