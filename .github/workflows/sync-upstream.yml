@@ -1,0 +1,48 @@
+name: Sync upstream source from workbuddy-manager release
+
+# 上游源码由 ithtelab/workbuddy-manager 维护者留存，并随其 Release 包分发（包内 upstream/）。
+# 本 workflow 定时拉取其最新 Release 的 upstream/ 同步进本仓库 upstream/ 目录；
+# 有变化则提交，进而触发 build.yml 重新构建镜像。
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Fetch latest upstream from workbuddy-manager release
+        run: |
+          set -euo pipefail
+          url=$(curl -sSL https://api.github.com/repos/ithtelab/workbuddy-manager/releases/latest \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);print(next(a['browser_download_url'] for a in d['assets'] if a['name'].endswith('.tar.gz')))")
+          echo "release: $url"
+          curl -sSL -o /tmp/mgr.tgz "$url"
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          tar xzf /tmp/mgr.tgz -C /tmp/x
+          src=$(find /tmp/x -maxdepth 3 -type d -name upstream | head -1)
+          test -n "$src" || { echo "upstream/ not found in release package"; exit 1; }
+          rm -rf upstream && mkdir -p upstream
+          cp -a "$src"/. upstream/
+          rm -rf upstream/.github upstream/.git
+          echo "$url" > upstream/UPSTREAM-SRC.txt
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore: sync upstream from workbuddy-manager release"
+            git push
+            echo "✅ upstream updated and pushed"
+          else
+            echo "✅ upstream already up to date"
+          fi

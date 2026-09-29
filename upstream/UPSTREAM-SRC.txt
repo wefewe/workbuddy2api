@@ -1,0 +1,8 @@
+本目录是上游 workbuddy2api 的源码快照，随本项目的 Release 一同分发。
+
+上游原仓库（github.com/Sliverkiss/workbuddy2api）已被其作者删除；源码由本项目
+维护者留存并继续维护。许可为 MIT（见 LICENSE，版权归原作者）——再分发请保留
+LICENSE 与版权声明。
+
+打包说明：scheduler：修睡眠/休眠跨过槽位导致签到被顺延或整段跳过（分段对墙钟 + cursor 逐个补跑 + 24h 补跑窗口），含 7 条回归测试
+打包时间：2026-09-28 12:18:00
