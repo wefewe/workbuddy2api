@@ -5,7 +5,7 @@ name: Sync upstream source from workbuddy-manager release
 # 有变化则提交，进而触发 build.yml 重新构建镜像。
 on:
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '17 */2 * * *'
   workflow_dispatch:
 
 jobs:
