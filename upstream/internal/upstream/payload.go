@@ -60,6 +60,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
 	normalizeToolChoice(obj)
+	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
@@ -343,5 +344,68 @@ func normalizeToolChoice(obj map[string]any) {
 		}
 	default:
 		delete(obj, "tool_choice")
+	}
+}
+
+// normalizeToolPatterns 归一化工具声明里 pattern 的非标准转义 `\_`（→ `_`）。
+//
+// 为什么需要：Codex 一类客户端会把正则里的下划线转义成 `\_`（如 `^agent\_run\_`），
+// 而上游那侧的 regexp 是 RE2 —— `\_` 属于**非法转义**，编译 pattern 时直接报错
+// （实案 code=11129）。症状是「聊天照常、工具调用一律失败」，且只在带这类 schema
+// 的工具上出现，自己很难归因（issue #112）。去掉转义后语义不变：`\_` 与 `_`
+// 在正则里都是下划线字面量。
+//
+// 只处理这一种转义：其余转义（`\d`、`\.`、`\`…）是合法且语义敏感的，动了会改
+// 用户 schema 的意思。声明形态两种都覆盖 —— 现行的 tools[].function.parameters
+// 与旧式 functions[].parameters（normalizeToolChoice 也是两种都认）。
+func normalizeToolPatterns(obj map[string]any) {
+	for _, key := range [...]string{"tools", "functions"} {
+		rawList, ok := obj[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range rawList {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			// 现行形态把 parameters 包在 function 里；旧式形态直接挂在条目上。
+			if fn, ok := item["function"].(map[string]any); ok {
+				unescapePatternLiteralEscapes(fn["parameters"])
+			}
+			unescapePatternLiteralEscapes(item["parameters"])
+		}
+	}
+}
+
+// unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties
+// 键中的 `\_` → `_`（patternProperties 的键也是正则；map 键不可原地改，命中时重建该层）。
+func unescapePatternLiteralEscapes(node any) {
+	switch n := node.(type) {
+	case map[string]any:
+		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
+			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
+		}
+		if props, ok := n["patternProperties"].(map[string]any); ok {
+			rebuilt := false
+			fixed := make(map[string]any, len(props))
+			for k, v := range props {
+				if strings.Contains(k, `\_`) {
+					k = strings.ReplaceAll(k, `\_`, `_`)
+					rebuilt = true
+				}
+				fixed[k] = v
+			}
+			if rebuilt {
+				n["patternProperties"] = fixed
+			}
+		}
+		for _, v := range n {
+			unescapePatternLiteralEscapes(v)
+		}
+	case []any:
+		for _, v := range n {
+			unescapePatternLiteralEscapes(v)
+		}
 	}
 }
