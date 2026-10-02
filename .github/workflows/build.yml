@@ -41,6 +41,40 @@ jobs:
             type=raw,value=latest
             type=sha
 
+      # ── 质量门禁：本地先编译运行 AMD64 镜像并探测健康检查，通过后才允许发布 ──
+      - name: Build local test image (AMD64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./upstream
+          file: ./upstream/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: local-test:latest
+          cache-from: type=gha
+
+      - name: Pre-flight smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke-test -p 7863:7863 local-test:latest
+          echo "Waiting for workbuddy2api to become healthy..."
+          passed=0
+          for i in $(seq 1 30); do
+            if curl -sS --fail http://127.0.0.1:7863/healthz >/dev/null 2>&1; then
+              echo "✅ Pre-flight smoke test passed on attempt $i!"
+              passed=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$passed" -ne 1 ]; then
+            echo "❌ Service failed healthcheck, aborting publish to GHCR!"
+            echo "--- Container logs ---"
+            docker logs smoke-test 2>&1 || true
+            docker rm -f smoke-test >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker rm -f smoke-test >/dev/null 2>&1 || true
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
