@@ -56,10 +56,10 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name smoke-test -p 7863:7863 local-test:latest
-          echo "Waiting for workbuddy2api to become healthy..."
+          echo "Waiting for workbuddy2api to respond with X-Service header..."
           passed=0
           for i in $(seq 1 30); do
-            if curl -sS --fail http://127.0.0.1:7863/healthz >/dev/null 2>&1; then
+            if curl -sS -i http://127.0.0.1:7863/healthz 2>&1 | grep -q "X-Service: workbuddy2api"; then
               echo "✅ Pre-flight smoke test passed on attempt $i!"
               passed=1
               break
