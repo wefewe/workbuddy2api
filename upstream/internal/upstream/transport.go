@@ -75,6 +75,13 @@ func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// 出口代理：走标准环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY，大小写都认）。
+		//
+		// 自定义 Transport **不设 Proxy 字段即为 nil**，这与 http.DefaultTransport
+		// 默认读环境变量不同 —— 于是「容器里配好代理、curl 能通、网关却仍走直连」
+		// 成了一种没有任何日志的静默失败（issue #136，群晖 + 代理出网的部署）。
+		// ProxyFromEnvironment 同时负责 NO_PROXY：内网/回环地址按环境变量绕过。
+		Proxy: http.ProxyFromEnvironment,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
