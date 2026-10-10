@@ -253,6 +253,38 @@ func fmtCreditsPrefix(raw string) string {
 	return "[" + s + " credit]"
 }
 
+// addListingCompat 补上第三方模型目录客户端要读的能力字段（issue #156：Magpie）。
+//
+// 它们不看我们自己的 supports_images / reasoning_supported_efforts，只看
+// `modalities.input` 里有没有 "image"、以及 `supported_reasoning_levels` 里每项的
+// `effort`。我们的字段是既有约定（面板与别的客户端在用），所以这里**只增不改**：
+// 两边同时输出，谁都能读。模型 ID 上的 cn:/global: 前缀保持不变 —— 它区分版本，
+// 不能为了目录兜底而抹掉。
+func addListingCompat(entry map[string]any) map[string]any {
+	if entry["supports_images"] == true {
+		entry["modalities"] = map[string]any{"input": []string{"text", "image"}}
+	}
+	var efforts []string
+	switch raw := entry["reasoning_supported_efforts"].(type) {
+	case []string:
+		efforts = raw
+	case []any:
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				efforts = append(efforts, s)
+			}
+		}
+	}
+	if len(efforts) > 0 {
+		levels := make([]map[string]any, 0, len(efforts))
+		for _, e := range efforts {
+			levels = append(levels, map[string]any{"effort": e})
+		}
+		entry["supported_reasoning_levels"] = levels
+	}
+	return entry
+}
+
 // applyModelInfoFields 把上游模型对象全字段（ModelInfo）按「空值省略」写出规则
 // 合入 /v1/models 条目：name/description/credits/tags/vendor/能力旗标/
 // max_allowed_size/reasoning_effort/reasoning_summary。CN 动态分支与 global
@@ -341,6 +373,7 @@ func (h *Handler) modelList() []map[string]any {
 				entry["reasoning_default_effort"] = def
 			}
 		}
+		addListingCompat(entry)
 		out = append(out, entry)
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
@@ -384,7 +417,8 @@ func (h *Handler) modelList() []map[string]any {
 					entry["reasoning_default_effort"] = def
 				}
 			}
-			out = append(out, entry)
+			addListingCompat(entry)
+		out = append(out, entry)
 		}
 	}
 	return out
@@ -797,6 +831,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
 					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
+			// 11148 is deterministic for this request body. Return immediately without
+			// rotating accounts or incrementing account failure counters.
+			if kind == upstream.ErrToolCallMismatch {
+				fail(acct.UID)
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch",
+					string(respBody), h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
 			}

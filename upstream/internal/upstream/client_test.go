@@ -44,6 +44,12 @@ func TestClassify(t *testing.T) {
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
 		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
+		// 11148 tool-call sequence mismatch is request-scoped, including nested/quoted code fields.
+		{400, "{\"code\":11148,\"msg\":\"tool calls and tool results do not match\"}", ErrToolCallMismatch},
+		{400, "{\"error\":{\"data\":{\"code\":\"11148\",\"message\":\"invalid tool history\"}}}", ErrToolCallMismatch},
+		{400, "tool_call_sequence_broken", ErrToolCallMismatch},
+		{400, "{\"requestId\":\"11148\",\"msg\":\"bad request\"}", ErrClient},
+		{500, "{\"code\":11148,\"msg\":\"tool calls and tool results do not match\"}", ErrServer},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
 		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。

@@ -87,6 +87,17 @@ linguo2625469/workbuddy2api-panel（autotask.go/desktop.go/report.go/tasks.go �
 """
 import sys, os, json, time, argparse, glob, urllib.request
 
+# Windows 中文区域的 stdout 默认按 ANSI 代码页（cp936）编码：账号昵称里带 emoji
+# （🏅）时，打印昵称的那一行会抛 UnicodeEncodeError，整个脚本就死在那儿
+# （issue #147）。面板侧已把子进程环境钉成 UTF-8，这里是脚本被单独运行
+# （cron / 手工执行）时的兜底：errors=replace 保证宁可打成 ? 也不中断。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import task_common as tc
 # 小程序开学季任务模块（直接 import 复用其 MP 指纹/事件构造/领奖端点，勿复制实现）。

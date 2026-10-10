@@ -18,6 +18,17 @@
 """
 import json, os, sys, urllib.request, urllib.error
 
+# Windows 中文区域的 stdout 默认按 ANSI 代码页（cp936）编码：账号昵称里带 emoji
+# （🏅）时，打印昵称的那一行会抛 UnicodeEncodeError，整个脚本就死在那儿
+# （issue #147）。面板侧已把子进程环境钉成 UTF-8，这里是脚本被单独运行
+# （cron / 手工执行）时的兜底：errors=replace 保证宁可打成 ? 也不中断。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 _BASE = "https://www.workbuddy.ai"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

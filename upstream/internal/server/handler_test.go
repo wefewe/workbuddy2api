@@ -2700,3 +2700,35 @@ func TestHandlerAppendTurnKeyStable(t *testing.T) {
 		t.Errorf("X-Conversation-Request-ID=%v want %q (derived from pre-rewrite body)", reqIDs, want)
 	}
 }
+
+func TestChatToolCallMismatchDoesNotRotateOrPenalize(t *testing.T) {
+	calls := 0
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 400, "{\"code\":11148,\"msg\":\"tool calls and tool results do not match, please start a new conversation and retry\"}", false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader("{\"model\":\"glm-5.2\",\"messages\":[]}")))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s want 400", rec.Code, rec.Body)
+	}
+	if calls != 1 {
+		t.Fatalf("request mismatch must not rotate, upstream calls=%d", calls)
+	}
+	if !strings.Contains(rec.Body.String(), "11148") ||
+		!strings.Contains(rec.Body.String(), "tool calls and tool results do not match") {
+		t.Fatalf("upstream error body should be preserved: %s", rec.Body)
+	}
+	for _, uid := range []string{"u1", "u2"} {
+		st, _ := p.Status(uid)
+		if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() || st.BreakerFails != 0 || st.InFlight != 0 {
+			t.Errorf("request-level mismatch penalized or leaked lease for %s: %+v", uid, st)
+		}
+	}
+}

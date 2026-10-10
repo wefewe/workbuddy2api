@@ -451,3 +451,56 @@ func TestRepackThenCleanupRealShape(t *testing.T) {
 	assertRepackPairsContiguous(t, msgs)
 	assertPairingSymmetric(t, msgs)
 }
+
+func TestRepackToolResultBlocksNoticeBeforeFirstResult(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{
+		map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}},
+	}}
+	notice := map[string]any{"role": "developer", "content": "URI guard"}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	next := map[string]any{"role": "user", "content": "next"}
+	out, changed := repackToolResultBlocks([]any{call, notice, result, next})
+	if !changed {
+		t.Fatal("notice before first result should trigger repacking")
+	}
+	if len(out) != 4 ||
+		reflect.ValueOf(out[0]).Pointer() != reflect.ValueOf(call).Pointer() ||
+		reflect.ValueOf(out[1]).Pointer() != reflect.ValueOf(result).Pointer() ||
+		reflect.ValueOf(out[2]).Pointer() != reflect.ValueOf(notice).Pointer() ||
+		reflect.ValueOf(out[3]).Pointer() != reflect.ValueOf(next).Pointer() {
+		t.Fatalf("unexpected order/content: %#v", out)
+	}
+}
+
+func TestRepackToolResultBlocksNoticeAndTurnBoundaries(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}, map[string]any{"id": "c2"}}}
+	dev := map[string]any{"role": "developer", "content": "dev"}
+	sys := map[string]any{"role": "system", "content": "system"}
+	r1 := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "one"}
+	r2 := map[string]any{"role": "tool", "tool_call_id": "c2", "content": "two"}
+	user := map[string]any{"role": "user", "content": "boundary"}
+	out, changed := repackToolResultBlocks([]any{call, dev, r1, sys, r2, user})
+	want := []any{call, r1, r2, dev, sys, user}
+	if !changed || !reflect.DeepEqual(out, want) {
+		t.Fatalf("changed=%v out=%#v want=%#v", changed, out, want)
+	}
+
+	nextCall := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "later"}}}
+	laterResult := map[string]any{"role": "tool", "tool_call_id": "later", "content": "later"}
+	input := []any{call, dev, user, r1, nextCall, laterResult}
+	out, changed = repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("must preserve turn boundary: changed=%v", changed)
+	}
+}
+
+func TestRepackToolResultBlocksTrailingNoticeIsNoop(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}}}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	notice := map[string]any{"role": "developer", "content": "notice"}
+	input := []any{call, result, notice}
+	out, changed := repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("trailing notice should be a no-op: changed=%v out=%#v", changed, out)
+	}
+}

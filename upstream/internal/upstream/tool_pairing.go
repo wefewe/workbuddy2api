@@ -58,12 +58,11 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				}
 			}
 		}
-		// 收集紧随其后（允许被其他消息打断）的同批 tool 结果，按原相对顺序。
 		out = append(out, messages[i])
 		i++
 		var results []any
-		var between []any
-		sawNonTool := false
+		var notices []any
+		noticeBeforeLaterResult := false
 		for i < len(messages) {
 			mm, ok := messages[i].(map[string]any)
 			if !ok {
@@ -75,31 +74,31 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				if !want[id] {
 					break
 				}
-				results = append(results, messages[i])
-				if sawNonTool {
-					changed = true
+				if len(notices) > 0 {
+					noticeBeforeLaterResult = true
 				}
+				results = append(results, messages[i])
 				i++
 				continue
 			}
-			if len(results) == 0 {
-				break // assistant 后没有结果：交由 cleanupOrphanToolCalls 处理
+			// System/developer notices may precede the first result or split parallel results.
+			// Keep them in this block and never cross a user or assistant turn.
+			if role == "system" || role == "developer" {
+				notices = append(notices, messages[i])
+				i++
+				continue
 			}
-			// 下一组 assistant.tool_calls 是新的组头，绝不能当插入物吞掉：一旦被收进
-			// between，它永远不再被外层循环当作组头处理，它自己那批结果也就永远得不
-			// 到重排（真实会话 msg[181] 正是这样漏掉的）。必须 break 交还外层循环。
-			if role == "assistant" {
-				if next, _ := mm["tool_calls"].([]any); len(next) > 0 {
-					break
-				}
-			}
-			// 同批结果尚未收齐时，中间消息视为插入物，暂存待后移。
-			between = append(between, messages[i])
-			sawNonTool = true
-			i++
+			break
+		}
+		if len(results) == 0 {
+			out = append(out, notices...)
+			continue
+		}
+		if noticeBeforeLaterResult {
+			changed = true
 		}
 		out = append(out, results...)
-		out = append(out, between...)
+		out = append(out, notices...)
 	}
 	if !changed {
 		return messages, false
