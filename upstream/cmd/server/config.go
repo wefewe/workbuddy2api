@@ -30,6 +30,9 @@ type Config struct {
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// CreditExhausted 积分耗尽后的冷却时长（如 "10m"）。空 = 旧行为：硬冷却到次日 04:00
+		// （等签到恢复）。配了就只退出这一小段，到期回到候选池（issue #78）。
+		CreditExhausted string `json:"credit_exhausted"`
 	} `json:"cooldown"`
 
 	Schedule config.Schedule `json:"schedule"`
@@ -117,17 +120,17 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
-		DegradeThreshold   int    `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
-		DegradeCooldownMax string `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
+		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
@@ -150,6 +153,7 @@ type Config struct {
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
+	CreditExhaustedDur  time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	DegradeCooldownDur  time.Duration `json:"-"`
@@ -248,6 +252,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
 	}
+	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
+		c.Cooldown.CreditExhausted = v
+	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -318,6 +325,20 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
+	// 填了必须是正时长（负值会让冷却立即到期，等于没冷却 —— 与其静默放行，不如报错）。
+	if v := strings.TrimSpace(c.Cooldown.CreditExhausted); v == "" {
+		c.CreditExhaustedDur = 0
+	} else {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("cooldown.credit_exhausted: %w", perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("cooldown.credit_exhausted: must be a positive duration, got %q", v)
+		}
+		c.CreditExhaustedDur = d
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

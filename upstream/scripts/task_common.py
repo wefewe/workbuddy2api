@@ -13,6 +13,7 @@
   - 领养   : POST /activity/growth/buddy/agreement + /buddy/first（幂等，+300c+8e）
 """
 import json, os, time, glob, urllib.request, urllib.error
+import random
 
 
 def _resolve_auths_dir() -> str:
@@ -294,3 +295,32 @@ def chat_completion(auth, model_id="glm-5.2", prompt="hi", max_tokens=32,
         return e.code, t[:200]
     except Exception as e:
         return -1, repr(e)[:200]
+
+class AccountSpacing:
+    """Delay between eligible accounts; the first account runs immediately."""
+    def __init__(self, minimum=0, maximum=0):
+        if not 0 <= minimum <= maximum <= 600:
+            raise ValueError("account delays require 0 <= min <= max <= 600 seconds")
+        self.minimum, self.maximum = minimum, maximum
+        self.started = False
+
+    def wait(self):
+        if self.started and self.maximum > 0:
+            delay = random.SystemRandom().uniform(self.minimum, self.maximum)
+            print(f"account spacing: waiting {delay:.1f}s", flush=True)
+            time.sleep(delay)
+        self.started = True
+
+
+def add_account_spacing_arguments(parser):
+    parser.add_argument("--account-delay-min", type=int, default=0,
+                        help="Minimum delay between accounts in seconds (default 0)")
+    parser.add_argument("--account-delay-max", type=int, default=0,
+                        help="Maximum randomized account delay in seconds (0 disables)")
+
+
+def account_spacing_from_args(args, parser):
+    try:
+        return AccountSpacing(args.account_delay_min, args.account_delay_max)
+    except ValueError as exc:
+        parser.error(str(exc))

@@ -14,12 +14,17 @@ import "fmt"
 // cmd/server 与 cmd/activity 共用本结构，默认值由 DefaultSchedule 填充、
 // 缺省归一由 Normalize 完成——两命令走同一份语义，不再各自复制。
 type Schedule struct {
-	CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-	TravelHours    []int `json:"travel_hours"`    // [9,21]
-	ActivityHours  []int `json:"activity_hours"`  // [10]
-	KeepaliveHours []int `json:"keepalive_hours"` // [22]
-	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
-	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
+	AccountDelayMinSeconds int `json:"account_delay_min_seconds"`
+	AccountDelayMaxSeconds int `json:"account_delay_max_seconds"`
+	// RandomDelayMinutes spreads each enabled daily slot within its scheduled
+	// hour. Zero preserves the exact-hour schedule; the supported maximum is 60.
+	RandomDelayMinutes int   `json:"random_delay_minutes"`
+	CheckinHours       []int `json:"checkin_hours"`   // [9,21]
+	TravelHours        []int `json:"travel_hours"`    // [9,21]
+	ActivityHours      []int `json:"activity_hours"`  // [10]
+	KeepaliveHours     []int `json:"keepalive_hours"` // [22]
+	SchoolHours        []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
+	CatHours           []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
 	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled
 	// 显式禁用开关（缺省 true）。
 	//
@@ -52,9 +57,9 @@ func DefaultSchedule() Schedule {
 		CheckinHours:        []int{9, 21},
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
-		KeepaliveHours:       []int{22},
-		SchoolHours:          []int{12},
-		CatHours:             []int{1},
+		KeepaliveHours:      []int{22},
+		SchoolHours:         []int{12},
+		CatHours:            []int{1},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,
@@ -74,6 +79,13 @@ func DefaultSchedule() Schedule {
 // 注意这是「显式配 0 = 旧行为」的兼容语义，与 scheduler.New 的 <=0 → 1 归一一致；
 // 「缺省 = 5」由 DefaultSchedule 在 Unmarshal 前置入，是另一条路径，两者不合并。
 func (s *Schedule) Normalize() error {
+	if s.AccountDelayMinSeconds < 0 || s.AccountDelayMaxSeconds > 600 ||
+		s.AccountDelayMaxSeconds < s.AccountDelayMinSeconds {
+		return fmt.Errorf("schedule account delays require 0 <= min <= max <= 600 seconds")
+	}
+	if s.RandomDelayMinutes < 0 || s.RandomDelayMinutes > 60 {
+		return fmt.Errorf("schedule.random_delay_minutes must be between 0 and 60")
+	}
 	if len(s.CheckinHours) == 0 {
 		s.CheckinHours = []int{9, 21}
 	}

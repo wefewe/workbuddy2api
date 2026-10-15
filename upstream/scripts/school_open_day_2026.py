@@ -797,7 +797,9 @@ def main():
     ap.add_argument("--token", default=None, help="显式覆盖 token（不同源凭证逃生门）")
     ap.add_argument("--uid", default="", help="配合 --token 指定 uid（仅日志用）")
     ap.add_argument("--gap", type=float, default=1.5, help="写动作间隔秒数（默认 1.5，最小 1.0）")
+    tc.add_account_spacing_arguments(ap)
     a = ap.parse_args()
+    account_spacing = tc.account_spacing_from_args(a, ap)
 
     if a.gap < 1.0:
         a.gap = 1.0  # 写操作间隔 ≥1s
@@ -844,6 +846,7 @@ def main():
             print(f"[skip] {uid8} global realm 不适用 CN 任务")
             stats["skip"] += 1
             continue
+        account_spacing.wait()
         try:
             if a.lottery_only:
                 lottery_account(auth, a, stats)

@@ -22,14 +22,18 @@ import (
 // 任务开关用「禁用」命名而非「启用」：零值 Config 即六类任务都启用（hours 回落默认），
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
-	Pool           *pool.Pool
-	Upstream       *upstream.Client
-	CheckinHours   []int // 默认 [9, 21]
-	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
-	ActivityHours  []int // 默认 [10]
-	KeepaliveHours []int // 默认 [22]
-	SchoolHours    []int // 默认 [12]：开学季任务（迁移自系统 crontab）
-	CatHours       []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
+	AccountDelayMinSeconds int // scheduled accounts only; zero range keeps existing pacing
+	AccountDelayMaxSeconds int
+	RandomDelayMinutes     int    // 0 = exact hours; 1..60 = randomized slot offset
+	RandomDelaySeed        string // private stable deployment identity; never logged
+	Pool                   *pool.Pool
+	Upstream               *upstream.Client
+	CheckinHours           []int // 默认 [9, 21]
+	TravelHours            []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
+	ActivityHours          []int // 默认 [10]
+	KeepaliveHours         []int // 默认 [22]
+	SchoolHours            []int // 默认 [12]：开学季任务（迁移自系统 crontab）
+	CatHours               []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
@@ -187,7 +191,7 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 		if sch.disabled {
 			continue
 		}
-		slots = append(slots, slot{nextFire(now, sch.hours), sch.kind})
+		slots = append(slots, slot{s.nextScheduledFire(now, sch), sch.kind})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -242,9 +246,9 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 // **墙钟**而整段跳过 —— 一天里最重要的一次签到就这么没了。
 //
 // 两个对策：
-//   1. waitForSlot 分段小睡（≤ slotPoll）并在每段醒来时重新对墙钟；
-//   2. Run 用 cursor（已派发的最后一个槽位）而不是 time.Now() 作为起点，睡眠跨过的
-//      多个槽位按时间顺序逐个补跑（超出 catchupWindow 的老槽位不补）。
+//  1. waitForSlot 分段小睡（≤ slotPoll）并在每段醒来时重新对墙钟；
+//  2. Run 用 cursor（已派发的最后一个槽位）而不是 time.Now() 作为起点，睡眠跨过的
+//     多个槽位按时间顺序逐个补跑（超出 catchupWindow 的老槽位不补）。
 var slotPoll = time.Minute
 
 // nowFunc 取当前**墙钟**时间。抽成变量只为一件事：测试能拨表（模拟机器睡了一夜），
@@ -296,8 +300,8 @@ func (s *Scheduler) dueSlots(cursor, now time.Time) []dueSlot {
 				continue
 			}
 			for _, h := range sch.hours {
-				t := time.Date(day.Year(), day.Month(), day.Day(), h, 0, 0, 0, loc)
-				if !t.After(start) || t.After(now) {
+				t := s.scheduledSlot(day, h, sch.kind)
+				if !t.After(cursor.Round(0)) || t.After(now) {
 					continue
 				}
 				out = append(out, dueSlot{planned: t, kinds: []taskKind{sch.kind}})
@@ -371,6 +375,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // 供 Run 主循环与测试使用；ctx 取消时由各任务内部的 sleepCtx 快速收尾。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+	// Account staggering also serializes coincident task types. Otherwise two
+	// independent batches can operate on different accounts at the same time.
+	if s.cfg.AccountDelayMaxSeconds > 0 {
+		for _, kind := range kinds {
+			if ctx.Err() != nil {
+				return
+			}
+			s.dispatch(ctx, kind)
+		}
+		return
+	}
 	var wg sync.WaitGroup
 	for _, k := range kinds {
 		wg.Add(1)
@@ -386,25 +401,28 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 // 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
 // ctx 传导给带账号间限速的遍历（取消时立即放弃剩余账号），纯脚本类任务不感知。
 func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
+	ctx = context.WithValue(ctx, scheduledAccountKey{}, true)
 	switch k {
 	case taskCheckin:
-		s.RunCheckinNow()
+		s.runCheckinNow(ctx)
 	case taskTravel:
 		s.runTravel(ctx)
 	case taskActivity:
 		s.runActivity(ctx)
 	case taskKeepalive:
-		s.RunKeepaliveNow()
+		s.runKeepalive(ctx)
 	case taskSchool:
-		s.RunSchoolNow()
+		s.runSchool(ctx)
 	case taskCat:
-		s.RunCatNow()
+		s.runCat(ctx)
 	}
 }
 
 // RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
-func (s *Scheduler) RunCheckinNow() {
-	if _, err := s.CheckinAll(); err != nil {
+func (s *Scheduler) RunCheckinNow() { s.runCheckinNow(context.Background()) }
+
+func (s *Scheduler) runCheckinNow(ctx context.Context) {
+	if _, err := s.checkinAll(ctx); err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
 	}
 }
@@ -416,6 +434,10 @@ func (s *Scheduler) RunCheckinNow() {
 // session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
 // 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	return s.checkinAll(context.Background())
+}
+
+func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
 	}
@@ -424,6 +446,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failN, skipN int
+	first := true
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
@@ -448,6 +471,13 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
+		if !first && !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+			return out, ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		first = false
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -564,7 +594,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -788,7 +818,10 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() {
+func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background()) }
+
+func (s *Scheduler) runKeepalive(ctx context.Context) {
+	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -797,6 +830,13 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		if !first && !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		first = false
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error

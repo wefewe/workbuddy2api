@@ -83,6 +83,7 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为）               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 
@@ -144,23 +145,33 @@ func main() {
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
 
+	// The private deployment identity makes the daily random offsets stable
+	// across restarts, and independent of other deployments. Never log the seed.
+	scheduleSeed := cfg.APIKey
+	if scheduleSeed == "" {
+		scheduleSeed = cfg.AuthDir
+	}
 	sch := scheduler.New(scheduler.Config{
-		Pool:                p,
-		Upstream:            up,
-		CheckinHours:        cfg.Schedule.CheckinHours,
-		TravelHours:         cfg.Schedule.TravelHours,
-		ActivityHours:       cfg.Schedule.ActivityHours,
-		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
-		SchoolHours:         cfg.Schedule.SchoolHours,
-		CatHours:            cfg.Schedule.CatHours,
-		ActivityReportCount: cfg.Schedule.ActivityReportCount,
-		ExpiringSoonWindow:  cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
-		CheckinDisabled:     !cfg.Schedule.CheckinEnabled,
-		TravelDisabled:      !cfg.Schedule.TravelEnabled,
-		ActivityDisabled:    !cfg.Schedule.ActivityEnabled,
-		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
-		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
-		CatDisabled:         !cfg.Schedule.CatEnabled,
+		AccountDelayMinSeconds: cfg.Schedule.AccountDelayMinSeconds,
+		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
+		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
+		RandomDelaySeed:        scheduleSeed,
+		Pool:                   p,
+		Upstream:               up,
+		CheckinHours:           cfg.Schedule.CheckinHours,
+		TravelHours:            cfg.Schedule.TravelHours,
+		ActivityHours:          cfg.Schedule.ActivityHours,
+		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
+		SchoolHours:            cfg.Schedule.SchoolHours,
+		CatHours:               cfg.Schedule.CatHours,
+		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
+		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
+		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
+		TravelDisabled:         !cfg.Schedule.TravelEnabled,
+		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
+		KeepaliveDisabled:      !cfg.Schedule.KeepaliveEnabled,
+		SchoolDisabled:         !cfg.Schedule.SchoolEnabled,
+		CatDisabled:            !cfg.Schedule.CatEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:

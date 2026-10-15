@@ -25,6 +25,10 @@ type Pool struct {
 	breakerCooldownMax time.Duration
 	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
 	softRateMax time.Duration
+	// creditExhausted 积分耗尽后的冷却时长（SetCreditExhausted 注入；0 = 旧行为
+	// 「硬冷却到次日 04:00，等签到恢复」）。配了就只退出这一小段，到期回到候选池
+	// —— 用户可能在期间充值、上游也可能刷新额度，挂一整天是浪费。
+	creditExhausted time.Duration
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -120,6 +124,14 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 	if d > 0 {
 		p.softRateMax = d
 	}
+}
+
+// SetCreditExhausted 注入「积分耗尽后的冷却时长」（cooldown.credit_exhausted）。
+// 0 = 不启用（保持「冷却到次日 04:00」的旧行为）。
+func (p *Pool) SetCreditExhausted(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.creditExhausted = d
 }
 
 // SetCostExploreInterval 注入 costTier 条件探索窗口（main 从 config 解析后调用，

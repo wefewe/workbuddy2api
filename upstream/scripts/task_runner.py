@@ -1586,7 +1586,9 @@ def main():
     ap.add_argument("--only-claim", action="store_true",
                     help="只领奖不点亮（已完成任务直接 claim，已领幂等）")
     ap.add_argument("--gap", type=float, default=1.0, help="动作间隔秒数（默认 1.0）")
+    tc.add_account_spacing_arguments(ap)
     a = ap.parse_args()
+    account_spacing = tc.account_spacing_from_args(a, ap)
 
     if a.gap < 1.0:
         a.gap = 1.0  # 写操作间隔 ≥1s
@@ -1627,6 +1629,7 @@ def main():
             print(f"[skip] {uid8} global realm 不适用 CN 任务")
             stats["skip"] += 1
             continue
+        account_spacing.wait()
         process_account(c, a, stats)
 
     print_summary(stats)
