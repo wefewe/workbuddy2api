@@ -138,6 +138,24 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
 }
 
+// codeRe 从上游响应体里抽业务码：数字（11140）与带横线的字符串（11-128）两种形态。
+// 上游偶尔给出**非法 JSON**（`"code":11-128` 没加引号，见 issue #201 的原始响应），
+// 所以这里用正则而不是 json.Unmarshal —— 解析失败的响应也要能报出码来。
+var codeRe = regexp.MustCompile(`"code"\s*:\s*"?([0-9]{2,8}(?:-[0-9]{1,4})?)"?`)
+
+// CodeOf 取上游响应体里的业务码字面值；取不到返回 ""。
+//
+// 存在的理由（issue #201 缺陷 1）：禁用/冷却理由里此前**写死**了 11140，而真实
+// 响应是 HTTP 400 + code 11-128 —— 排障时按 11140 去搜会得到完全错误的方向
+// （"UA 平台段送错"）。理由里带上响应自己的码，才不会把人带偏。
+func CodeOf(body string) string {
+	m := codeRe.FindStringSubmatch(body)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
 // hardRule 余额不足关键词（大小写不敏感 + 中文原文双通道）。
 var hardRule = errorRule{kind: ErrHardCredit, mode: matchFold, patterns: []string{
 	"insufficient credit", "no credit", "credit exhausted", "credits exhausted", "out of credit",
@@ -223,6 +241,13 @@ var accountFaultRule = errorRule{kind: ErrAccountFault, mode: matchFold, pattern
 	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+	// 11-128「conversation id missing」：上游按账号灰度启用的渠道校验（issue #193/#201）。
+	// 出站已补会话头族（session.ConversationIDForHeaders），仍撞上说明该账号被灰度到
+	// 了别的口径 —— **它是账号级的持续性故障**，不是"客户端请求有问题"：同一账号必拦、
+	// 未灰度账号零交叉（#193 的账号维度实测）。此前它落通用 4xx → 只换号不罚号，坏号
+	// 留在池里"显示健康、每次被选中都失败"（#201 缺陷 2）。归到本类由
+	// applyErrorPolicy 按账号级处理（软冷却，不禁用：可能随上游灰度调整自愈）。
+	"conversation id missing",
 }}
 
 // promptTooLongRule 11115「prompt is too long」判定（任务书 prompt-too-long §1）。
@@ -235,7 +260,7 @@ var accountFaultRule = errorRule{kind: ErrAccountFault, mode: matchFold, pattern
 //
 // 只在 400/404/413 请求级状态码上判（429+11115 概率极低且属限流语义优先，
 // 5xx 属服务端故障优先）——与 IsModelBlocked 的 400/404 口径同理。误判代价
-//（好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
+// （好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
 // 上游原文可自行排查，代价可控。
 var promptTooLongRule = errorRule{kind: ErrPromptTooLong, mode: matchFold, patterns: []string{
 	`"code":11115`,
@@ -270,7 +295,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 错误风暴（429 轰炸）时尤甚。模式串均为纯常量，与 sanitize.go 的包级
 // 预编译先例保持一致。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -562,6 +587,13 @@ func Classify(status int, body string) ErrKind {
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if sessionDeadRule.hit(body, lower) {
 		return ErrSessionDead
+	}
+	// 渠道校验（/v2 上的新强校验，2026-10-17）：归**账号级**分类，但 applyErrorPolicy
+	// 里最先判它、只做软冷却（绝不禁用，理由见那里的注释）。不在这里归类的话：没带
+	// `request illegal` 字样的渠道校验会落通用 4xx「只换号不罚号」，坏号留在池里
+	// "显示健康、每次被选中都失败" —— 与 issue #201 缺陷 2 同型。
+	if IsChannelCheck(body) {
+		return ErrAccountFault
 	}
 	if accountFaultRule.hit(body, lower) {
 		return ErrAccountFault
@@ -1038,8 +1070,29 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	return nil
 }
 
-// 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
-const chatCompletionsPath = "/v2/chat/completions"
+// chat 出站路径：/v2 为主，/console 作为**兜底**（见 chatPaths）。
+const (
+	chatCompletionsPath = "/v2/chat/completions"
+	chatConsolePath     = "/console/chat/completions"
+)
+
+// IsChannelCheck 判上游的「渠道校验」拒绝（11128 / 11-128 家族，2026-10-17）。
+//
+// 指纹要**两条同时成立**：业务码（11128 或 11-128）**且**文案里出现渠道校验的措辞。
+// 只认码不行 —— 同一个 11-128 还承载「内容审核拦截」（`blocked by security policy`，
+// 见 contentBlockedRule），那种必须保持原行为（不换路径、不罚号、走降级重试）。
+// 文案两种语言都可能出现：中文「渠道校验」与英文 displayTips 的 channel verification
+// / official client；`request illegal` 这类历史 msg 也可能随同一封套出现，所以不能
+// 拿 msg 当判据。
+func IsChannelCheck(body string) bool {
+	lower := strings.ToLower(body)
+	if !codeMarker(lower, "11128") && !codeMarker(lower, "11-128") {
+		return false
+	}
+	return strings.Contains(body, "渠道校验") ||
+		strings.Contains(lower, "channel verification") ||
+		strings.Contains(lower, "official client")
+}
 
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // DeptestOnly: 全库仅 upstream 包测试引用；生产全走 ChatStreamContext
@@ -1081,7 +1134,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
+	paths := c.chatPaths(a)
+	for i, path := range paths {
 		url := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
 		if err != nil {
@@ -1115,8 +1169,21 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
-			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链；billing 层的
-			// 404 fallback 独立存在，语义不受影响）。
+			// 路径级拒绝 → 换下一个候选路径再试，**不**把它当账号问题。
+			//   · 渠道校验（11128/11-128）：/v2 新增强校验，/console 放行（见 chatPaths）；
+			// 触发条件**只有渠道校验**：404/405 不回落是 #119 的刻意取舍（/console 挂
+			// WAF 内容规则，不能因为路径写错就整批改道），契约由
+			// TestGlobalChatNoFallbackOn404 钉着；渠道校验是另一回事 —— /v2 新加强
+			// 校验而 /console 放行，不换就是整池被拦。只在还有候选时继续；两条都
+			// 失败仍按下面原有逻辑返回，由 handler 决定怎么罚号 —— 那时也**不该禁用**
+			// （见 handler 的 ErrAccountFault 分支）。
+			if i < len(paths)-1 && IsChannelCheck(string(raw)) {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: %s 被拒（%d），换路径 %s 重试",
+					logfmt.Label(a.UID, a.Nickname), path, resp.StatusCode, paths[i+1])
+				continue
+			}
+			// ≥400 直接返回（除上面的渠道校验换路径外，chat 层无 fallback 链；billing
+			// 层的 404 fallback 独立存在，语义不受影响）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析，P1-2）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
 			if kind == ErrNone {
@@ -1136,10 +1203,18 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }
 
-// chatPaths 返回按 realm 的 chat 路径候选序列：
-// global → [/v2]（#119 固定单路径，见 ChatStreamContext 头注释）；cn → [/v2]（单元素，现状）。
+// chatPaths 返回按 realm 的 chat 路径候选序列：**/v2 优先，/console 兜底**。
+//
+// 兜底是 2026-10-17 加的（用户报告 + 实测）：上游对 /v2/chat/completions 新增了渠道
+// 强校验 —— 被校验到的请求回 11128 / 11-128「没通过渠道校验，可能不是官方客户端发出的」，
+// 而官方客户端走的 /console 端点正常放行；换过去之后连通性测试与对话全部恢复。
+//
+// 与 #119 的关系：那时实测 /console 挂腾讯云 WAF 的 body 内容规则（反引号 printf/whoami
+// 等命令执行特征确定性 403），所以把 /v2 定为主路径 —— 这一点没变：**只有** /v2 被判定为
+// 渠道校验时才换 /console（见 ChatStreamContext 的 fallback 条件），主路径行为零改动。
+// 这也正是 #119 注释里写的「若上游未来关闭 /v2，届时应重新启用 /console」。
 func (c *Client) chatPaths(a *auth.Auth) []string {
-	return []string{chatCompletionsPath}
+	return []string{chatCompletionsPath, chatConsolePath}
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens + 上游模型对象全字段）。

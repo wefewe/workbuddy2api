@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -652,7 +653,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//       也空走 NewMessageID 请求级（TurnRequestID 空键行为）——轮转内捕获
 	//       一次即共享。
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	//   - conversationID：客户端给了就透传原值；**没给时派生一个同会话稳定的值**
+	//     （issue #193：上游对部分账号灰度启用渠道校验，缺 X-Conversation-ID 即判
+	//     11-128「conversation id missing」，被灰度到的账号每次被选中都失败）。
+	//     派生锚点见 session.ConversationIDForHeaders 的注释；只补**头**、不往 body
+	//     里塞 conversationId —— #193 的剥离实测证明校验对象是头，body 那个字段不是
+	//     必填项。
+	chatMeta := upstream.ChatMeta{ConversationID: session.ConversationIDForHeaders(body, sessKey)}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -1054,6 +1061,25 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
+// upstreamCodeLabel 给「禁用/冷却理由」用的短标签：优先取响应体里的**真实业务码**
+// （数字，或 11-128 这种带横线的字符串），取不到再回落到 HTTP 状态。
+//
+// 不写死具体码是刻意的（issue #201 缺陷 1）：这条分支历史上只见过 11140，于是理由
+// 里写死了它；现场实际是 `http 400 + code 11-128`，排障的人拿着 11140 去搜方向全错
+// （11140 指向"UA 平台段送错"，而真实原因是渠道校验）。
+func upstreamCodeLabel(body string, uerr *upstream.Error) string {
+	if code := upstream.CodeOf(body); code != "" {
+		if uerr != nil && uerr.Status > 0 {
+			return fmt.Sprintf("code %s, http %d", code, uerr.Status)
+		}
+		return "code " + code
+	}
+	if uerr != nil && uerr.Status > 0 {
+		return fmt.Sprintf("http %d", uerr.Status)
+	}
+	return "unknown code"
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
 	switch kind {
 	case upstream.ErrHardCredit:
@@ -1104,16 +1130,45 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
-		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultMarkers 一致）：
-		//   - "request illegal"（code 11140）→ 账号级**授权封禁**：软冷却到期也不会自动
-		//     恢复（需重新 OAuth 登录），到期后重新选号只会再撞 403 浪费一次轮换——
-		//     硬禁用（Disable），不再参与选号。/status 以 disabled + disabled_reason 呈现。
+		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultRule 一致）：
+		//   - "request illegal"（本机实测是 11-128；历史注释里的 11140 是 403 平台段
+		//     错误场景）→ 账号级**授权封禁**：软冷却到期也不会自动恢复（需重新 OAuth
+		//     登录），到期后重新选号只会再撞一次同样的答复、白费一次轮换——硬禁用
+		//     （Disable），不再参与选号。/status 以 disabled + disabled_reason 呈现。
+		//   - "conversation id missing"（同为 11-128）→ 上游**按账号灰度**启用的渠道
+		//     校验（issue #193）。出站已补会话头族（session.ConversationIDForHeaders），
+		//     仍撞上说明该账号被灰度到了别的口径：按账号级**软冷却**处理 —— 只换号不
+		//     禁用（灰度随时可能放开，禁用会让用户白重新登录），但必须把它暂时挪出池子，
+		//     否则它留在池里"显示健康、每次被选中都失败"（issue #201 缺陷 2）。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
-		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
+		// 三条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
-			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+		lowerBody := strings.ToLower(body)
+		// **渠道校验必须判在「request illegal」之前**（用户报告 2026-10-17）：同一次
+		// 渠道校验会随封套给出不同的 msg（`request illegal` / `conversation id missing`
+		// / 中文「没通过渠道校验」），而按 msg 分野时 `request illegal` 那条会**硬禁用**
+		// 账号 —— 于是被校验到的号在面板上显示「已禁用（需重新登录）」，用户以为凭证
+		// 坏了去重扫，扫完还是被禁（凭证从来没问题）。账号本身是好的，禁用是误判。
+		// 上游层已先做过换路径兜底（/v2 → /console，见 upstream.chatPaths）；两条都被
+		// 拒才走到这里：软冷却让它退出轮换（别被反复选中），但**不清凭证、不标禁用**。
+		if upstream.IsChannelCheck(body) {
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown,
+				"channel check ("+upstreamCodeLabel(body, uerr)+")")
+			return
+		}
+		if strings.Contains(lowerBody, "request illegal") {
+			// 理由里带**响应自己的码**（issue #201 缺陷 1：此前写死 11140，而真实响应
+			// 是 http 400 + code 11-128 —— 按 11140 去搜会把排障方向带偏）。
+			h.cfg.Pool.Disable(uid, fmt.Sprintf(
+				"account banned by upstream (request illegal, %s), re-login required",
+				upstreamCodeLabel(body, uerr),
+			))
+			return
+		}
+		if strings.Contains(lowerBody, "conversation id missing") {
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown,
+				"channel check (conversation id missing, "+upstreamCodeLabel(body, uerr)+")")
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "account fault (14017)")

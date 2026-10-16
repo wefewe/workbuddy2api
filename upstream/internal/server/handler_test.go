@@ -511,7 +511,9 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	if !st.Disabled {
 		t.Fatalf("bad 应被硬禁用（11140 封禁需重登，不可自愈）: %+v", st)
 	}
-	wantReason := "account banned by upstream (11140 request illegal), re-login required"
+	// 理由里带**响应自己的码**（issue #201：此前写死 11140，现场真实响应是 11-128，
+	// 拿着 11140 去搜方向全错）。本用例的响应体是 11140 + 403，理由如实反映它。
+	wantReason := "account banned by upstream (request illegal, code 11140, http 403), re-login required"
 	if st.DisabledReason != wantReason {
 		t.Errorf("disabled_reason=%q want %q", st.DisabledReason, wantReason)
 	}
@@ -587,7 +589,7 @@ func TestChatAccountFault14017Rotates(t *testing.T) {
 // 分类下按 msg 分野——"request illegal"(11140) → 硬禁用；"trial"(14017) → 软冷却不禁用。
 // 端到端接线由上方 TestChatAccountFault11140Disables / TestChatAccountFault14017Rotates 覆盖。
 func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
-	const why11140 = "account banned by upstream (11140 request illegal), re-login required"
+	const why11140 = "account banned by upstream (request illegal, code 11140), re-login required"
 
 	t.Run("11140 request illegal disables", func(t *testing.T) {
 		p := pool.New("")
@@ -624,6 +626,39 @@ func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
 			t.Errorf("14017 冷却 reason 不应为空: %+v", st)
 		}
 	})
+}
+
+// TestApplyErrorPolicyConversationIDMissingCools 11-128「conversation id missing」
+// 按**账号级软冷却**处理（issue #193 / #201 缺陷 2）。
+//
+// 上游对部分账号灰度启用了渠道校验：出站缺 X-Conversation-ID 头族即被判
+// 11-128。网关已在出站补会话头族（session.ConversationIDForHeaders），仍撞上说明
+// 该账号被灰度到了别的口径 —— 这时**不能**像以前那样归到通用 4xx「只换号不罚号」：
+// 那会让坏号留在池里"显示健康、每次被选中都失败"（报告里 14 个号中 7 个被拦死、
+// 却只有 2 个被禁用）。也不硬禁用：灰度随时可能放开，禁用会让用户白重新登录。
+func TestApplyErrorPolicyConversationIDMissingCools(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	// 上游实测形态：HTTP 400 + code 11-128，且 code 的值**没加引号**（非法 JSON）。
+	// 理由里的码必须照实取到 —— 这条用例同时钉住 CodeOf 对非法 JSON 的容忍。
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault,
+		`{"code":11-128,"msg":"conversation id missing","requestId":"x","displayMsg":{"zh":"请求被拦截，请重新发送"}}`,
+		"glm-5.2", &upstream.Error{Kind: upstream.ErrAccountFault, Status: 400, Msg: "conversation id missing"})
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("渠道校验不应硬禁用（灰度可能放开，禁用等于让用户白重登）: %+v", st)
+	}
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("应 soft_rate 软冷却（挪出池子但可自愈）: %+v", st)
+	}
+	if !strings.Contains(st.Reason, "11-128") {
+		t.Errorf("冷却理由应带真实码，否则排障按错码去搜: %q", st.Reason)
+	}
+	if strings.Contains(st.Reason, "11140") {
+		t.Errorf("理由里不该出现写死的 11140（issue #201 缺陷 1）: %q", st.Reason)
+	}
 }
 
 // TestApplyErrorPolicySoftRateNoDoubleWhenCooling handler 层回归：无重置时间的 429

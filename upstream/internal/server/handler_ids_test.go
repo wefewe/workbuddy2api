@@ -137,6 +137,58 @@ func TestChatConversationIDPassthrough(t *testing.T) {
 	}
 }
 
+// TestChatConversationIDDerivedWhenClientOmitsIt 客户端**没带** conversationId 时，
+// 出站仍要发 X-Conversation-ID，且同一会话多轮派生出同一个值（issue #193）。
+//
+// 为什么必须发：上游 2026-10-16 起对部分账号灰度启用渠道校验，缺这个头即判
+// 11-128「conversation id missing」——被灰度到的账号每次被选中都失败（同池实测：
+// 被拦账号必拦、未灰度账号零交叉）。旧行为是"客户端没给就不发（不伪造）"，灰度推开
+// 后等于把那些账号判了死刑；补一个稳定值既过校验，也保住后台按会话聚合的语义。
+func TestChatConversationIDDerivedWhenClientOmitsIt(t *testing.T) {
+	var headers []http.Header
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			headers = append(headers, r.Header.Clone())
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	// 同一会话的两轮：首条 user 消息不变，末尾那句变（真实 agent 多轮的形态）。
+	turns := []string{
+		`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"帮我改这个函数"},{"role":"assistant","content":"好"},{"role":"user","content":"再优化一下"}]}`,
+		`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"帮我改这个函数"},{"role":"assistant","content":"好"},{"role":"user","content":"换个思路"}]}`,
+	}
+	for _, body := range turns {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+	}
+	if len(headers) != len(turns) {
+		t.Fatalf("出站次数=%d want %d", len(headers), len(turns))
+	}
+	first := headers[0].Get("X-Conversation-ID")
+	if first == "" {
+		t.Fatal("客户端没给 conversationId 时，出站 X-Conversation-ID 仍必须发（否则 11-128 渠道校验必拦）")
+	}
+	if got := headers[1].Get("X-Conversation-ID"); got != first {
+		t.Errorf("同会话两轮派生出不同值：%q vs %q —— 后台会把一个会话拆成多条", first, got)
+	}
+	// 会话级 ≠ 轮级：两者形态相同（32 hex）但语义不同，别让实现退化成"都取同一个值"。
+	if first == headers[0].Get("X-Conversation-Request-ID") {
+		t.Error("X-Conversation-ID 与 X-Conversation-Request-ID 不该是同一个值（会话级 vs 轮级）")
+	}
+}
+
 // TestChatConversationRequestIDInboundPassthrough 入站自带 X-Conversation-Request-ID →
 // 出站原样透传（客户端已有自己的对话轮 ID 时以客户端为准）。
 func TestChatConversationRequestIDInboundPassthrough(t *testing.T) {

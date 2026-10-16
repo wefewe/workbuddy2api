@@ -77,6 +77,33 @@ func RequestIDForKey(key string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// ConversationIDForHeaders 给出站会话头族要用的 X-Conversation-ID：客户端给了就用
+// 它的原值，没给就**派生一个同一会话稳定的值**。
+//
+// 为什么不再"客户端没给就不发"（issue #193）：上游 2026-10-16 起对**部分账号**
+// 灰度启用了渠道校验，出站缺 X-Conversation-ID 即判 `11-128 conversation id missing`
+// —— 被灰度到的账号在池里每次被选中都失败（实测同一账号必拦、未灰度的账号零交叉）。
+// 头族本身是官方客户端的形态，补一个稳定值既让校验通过，也保住后台按会话聚合的
+// 语义（同会话多轮恒同值）。issue #193 的剥离实测：校验对象是**头**，body 里的
+// conversationId **不是**必填项，所以这里只补头、不改 body。
+//
+// 稳定性锚点取**首条 user 消息**（firstUserText）：一次会话内它不变，所以同会话的
+// 多轮请求、换号重试、降级重发都派生出同一个值；不同会话首条消息不同 → 不会被并成
+// 一个会话。回落顺序：首条 user 消息 → 会话键（sessKey）→ 请求级随机（此时没有任何
+// "会话"可供聚合，随机值只为满足校验，与 RequestIDForKey 的空键语义一致）。
+func ConversationIDForHeaders(body []byte, sessKey string) string {
+	if v := ResolveConversationID(body); v != "" {
+		return v
+	}
+	if anchor := firstUserText(body); anchor != "" {
+		return RequestIDForKey("conv:" + anchor)
+	}
+	if sessKey != "" {
+		return RequestIDForKey("conv:" + sessKey)
+	}
+	return NewMessageID()
+}
+
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的
 // 「序号 + 文本」。
 //
