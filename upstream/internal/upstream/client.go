@@ -39,6 +39,9 @@ const (
 	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
+	// ErrEmptyMessage 11151「a message has empty content」→ 请求级错误：同 body 换
+	// 任何账号都是同一结果，换号只会白扔健康号配额、最后把 400 包装成 503（issue #203）。
+	ErrEmptyMessage
 )
 
 func (k ErrKind) String() string {
@@ -67,6 +70,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrEmptyMessage:
+		return "empty_message"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
 	case ErrClient:
@@ -562,6 +567,15 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     带业务信封的 403 已被上方各层捕获（11140 request illegal →
 //     ErrAccountFault 禁用语义不变），走不到本层。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//
+// isEmptyMessage 11151「a message has empty content」的判定：code 标记 + 文案双通道。
+// 文案在中文体里也可能出现，所以同时认 code（宽松形态，见 codeMarker）。
+func isEmptyMessage(lower string) bool {
+	return codeMarker(lower, "11151") ||
+		strings.Contains(lower, "a message has empty content") ||
+		strings.Contains(lower, "存在空白消息")
+}
+
 func isToolCallMismatch(lower string) bool {
 	return strings.Contains(lower, "tool calls and tool results do not match") ||
 		strings.Contains(lower, "tool_call_sequence_broken") ||
@@ -649,6 +663,12 @@ func Classify(status int, body string) ErrKind {
 	// 11148 is deterministic for this request body, so switching accounts cannot fix it.
 	if status == http.StatusBadRequest && isToolCallMismatch(lower) {
 		return ErrToolCallMismatch
+	}
+	// 11151「a message has empty content」：同样是**请求内容**决定的结果（issue #203）。
+	// 判在通用 4xx 之前：否则它落 ErrClient「只换号不罚号」，轮完一圈拿 503 收场 ——
+	// 客户端看到的是「服务不可用」，而真实原因只是对话里有一条空消息。
+	if status == http.StatusBadRequest && isEmptyMessage(lower) {
+		return ErrEmptyMessage
 	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
@@ -782,6 +802,45 @@ func (c *Client) chatHTTP() *http.Client {
 		return c.ChatHTTP
 	}
 	return c.HTTP
+}
+
+// clientFor 返回该账号出站应使用的 client（issue #210）。
+//
+// 未绑线路（ProxyName 为空）→ 走原来的共享 client，行为一字不变。
+// 绑了线路 → 换成按线路缓存的 Transport（连接池分开，出口不串）。
+// 线路名未知 → 返回 error，**不静默直连**：静默直连等于「以为隔离了其实没有」。
+func (c *Client) clientFor(a *auth.Auth, chat bool) (*http.Client, error) {
+	name := ""
+	if a != nil {
+		name = strings.TrimSpace(a.ProxyName)
+	}
+	if name == "" {
+		if chat {
+			return c.chatHTTP(), nil
+		}
+		if c.HTTP != nil {
+			return c.HTTP, nil
+		}
+		return &http.Client{Timeout: 120 * time.Second, Transport: newTransport()}, nil
+	}
+	tr, err := TransportFor(name)
+	if err != nil {
+		label := ""
+		if a != nil {
+			label = logfmt.Label(a.UID, a.Nickname) + " "
+		}
+		return nil, fmt.Errorf("账号 %s出口线路不可用：%w", label, err)
+	}
+	if chat {
+		// 聊天无总时长（SSE 长流），首字节由 Transport 的 ResponseHeaderTimeout 管
+		return &http.Client{Timeout: 0, Transport: tr}, nil
+	}
+	return &http.Client{Timeout: 120 * time.Second, Transport: tr}, nil
+}
+
+// chatHTTPFor 聊天用 client（按账号线路）。
+func (c *Client) chatHTTPFor(a *auth.Auth) (*http.Client, error) {
+	return c.clientFor(a, true)
 }
 
 // defaultGlobalBase 缺省 global base（D5：config 未覆盖时默认 workbuddy.ai）。
@@ -942,8 +1001,12 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1018,12 +1081,13 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		EnterpriseID: a.EnterpriseID,
 		Nickname:     a.Nickname,
 		DeviceToken:  a.DeviceToken,
+		ProxyName:    a.ProxyName,
 	}
 	a.Unlock()
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(&hdrSnapshot, req)
 	if err != nil {
 		return err
 	}
@@ -1134,6 +1198,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
+	chatClient, cerr := c.chatHTTPFor(a)
+	if cerr != nil {
+		// 线路配置错误：立刻失败、**不进轮转**（换多少个号都一样），也不喂熔断 ——
+		// 这是配置问题，不是账号问题（见 clientFor 的注释）。
+		return nil, 0, nil, cerr
+	}
 	paths := c.chatPaths(a)
 	for i, path := range paths {
 		url := c.chatBase(a) + path
@@ -1146,14 +1216,14 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		resp, err := chatClient.Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固第 5 件）：
 			// 失败连接可能仍留在空闲池里，下一个请求会继续捡到它（kongjianguan
 			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			roundTripCloseIdle(chatClient.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {

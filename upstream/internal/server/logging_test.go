@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
@@ -404,5 +405,27 @@ func TestHealthzDoesNotLogTableRow(t *testing.T) {
 	})
 	if strings.Contains(out, "| #") {
 		t.Errorf("healthz/models/status must not emit table rows:\n%s", out)
+	}
+}
+
+// 日志的模型列要装得下带区域后缀的模型名（issue #207）。
+//
+// 现场：26 字节的列宽把 global:deepseek-v4.1-flash-sg（29 字节）截成
+// global:deepseek-v4.1-flash —— 面板里显示的模型名与实际请求的不是同一个，
+// 排障时会以为「请求的是这个模型」。按字节截断本身是对的（列对齐），余量得够。
+func TestChatModelColumnFitsRegionSuffixedNames(t *testing.T) {
+	for _, name := range []string{
+		"global:deepseek-v4.1-flash-sg",
+		"cn:deepseek-v4.1-flash-sg",
+		"global:gpt-5.6-sol",
+	} {
+		if got := logfmt.Truncate(name, chatModelWidth); got != name {
+			t.Errorf("模型列宽 %d 装不下 %q（被截成 %q）", chatModelWidth, name, got)
+		}
+	}
+	// 列宽仍要对齐：超长的照旧截断到列宽
+	long := strings.Repeat("x", chatModelWidth+10)
+	if got := logfmt.Truncate(long, chatModelWidth); len(got) != chatModelWidth {
+		t.Errorf("超长模型名应按列宽截断，got len=%d", len(got))
 	}
 }

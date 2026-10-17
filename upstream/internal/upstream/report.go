@@ -37,7 +37,7 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 		return nil, err
 	}
 	c.BillingHeaders(req, a)
-	return c.doJSON(req)
+	return c.doJSON(a, req)
 }
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。

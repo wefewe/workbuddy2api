@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -83,6 +84,14 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	// 账号级出口线路（issue #210）：面板绑在线路名上，这里把名字解析成地址。
+	upstream.ConfigureProxies(cfg.Proxies)
+	if names := upstream.RouteNames(); len(names) > 0 {
+		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
+			len(names), strings.Join(names, ", "))
+	} else {
+		log.Printf("未配置出口线路（config.json 的 proxies 段）：账号绑定的线路名会明确报错，不会静默直连")
+	}
 	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为）               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）

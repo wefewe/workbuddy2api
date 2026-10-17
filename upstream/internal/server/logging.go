@@ -224,9 +224,12 @@ func uidPrefix(uid string) string {
 // 是为了让 stdout 里成百上千行能竖着扫——否则模型名长短不一、中文昵称按字节补空格
 // 错位，根本没法用肉眼对齐着一列列看（这正是上一版 11 字节硬截断要解决的问题）。
 const (
-	// chatModelWidth 覆盖 realm 前缀 + 最长模型名："global:" (7) + "deepseek-v4.1-flash" (19) = 26。
+	// chatModelWidth 覆盖 realm 前缀 + 最长模型名（含区域后缀，issue #207）：
+	// "global:" (7) + "deepseek-v4.1-flash-sg" (22) = 29，留 3 字节余量取 32。
+	// 按字节截断是刻意的（列对齐），但余量必须够 —— 26 会把 -sg 截掉，于是面板里
+	// 显示的模型名与实际请求的不是同一个。
 	// 旧的 11 字节截断会把 "cn:deepseek-v4-flash" 切成 "cn:deepseek"，让人误以为是另一个模型。
-	chatModelWidth = 26
+	chatModelWidth = 32
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
 	chatAcctWidth = 22
 	chatTTFBWidth = 8

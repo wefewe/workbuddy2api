@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,13 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// Proxies 账号级出口线路表：线路名 → 代理地址（http / https / socks5 / socks5h）。
+	//
+	// 面板会给账号绑一条线路（auths/*.json 顶层 `proxy` 写的是**线路名**），这个名字
+	// 在这里解析成地址；线路名查不到时上游**明确报错、不静默直连**（静默直连等于
+	// 「以为隔离了其实没隔离」，见 upstream.TransportFor）。
+	Proxies map[string]string `json:"proxies"`
 
 	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
 
@@ -255,6 +263,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
 		c.Cooldown.CreditExhausted = v
 	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_PROXIES")); v != "" {
+		var table map[string]string
+		if err := json.Unmarshal([]byte(v), &table); err == nil {
+			c.Proxies = table
+		}
+	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -326,6 +340,34 @@ func (c *Config) normalize() error {
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
 	}
+	// 出口线路表：名字与地址都去空白；scheme 只认 http/https/socks5/socks5h。
+	// 这里**启动即校验**：地址写错时让上游起不来（带明确提示），比跑起来以后每个
+	// 请求都失败容易发现得多；线路名查不到（账号引用了不存在的名字）则在用时明确报错。
+	if len(c.Proxies) > 0 {
+		clean := make(map[string]string, len(c.Proxies))
+		for name, addr := range c.Proxies {
+			n := strings.TrimSpace(name)
+			v := strings.TrimSpace(addr)
+			if n == "" || v == "" {
+				continue
+			}
+			u, err := url.Parse(v)
+			if err != nil {
+				return fmt.Errorf("proxies[%s]: %w", n, err)
+			}
+			switch strings.ToLower(u.Scheme) {
+			case "http", "https", "socks5", "socks5h":
+			default:
+				return fmt.Errorf("proxies[%s]: 不支持的协议 %q（只能是 http/https/socks5/socks5h）", n, u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("proxies[%s]: 地址缺少主机名（%q）", n, v)
+			}
+			clean[n] = v
+		}
+		c.Proxies = clean
+	}
+
 	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
 	// 填了必须是正时长（负值会让冷却立即到期，等于没冷却 —— 与其静默放行，不如报错）。
 	if v := strings.TrimSpace(c.Cooldown.CreditExhausted); v == "" {

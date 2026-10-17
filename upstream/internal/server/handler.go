@@ -419,7 +419,7 @@ func (h *Handler) modelList() []map[string]any {
 				}
 			}
 			addListingCompat(entry)
-		out = append(out, entry)
+			out = append(out, entry)
 		}
 	}
 	return out
@@ -841,6 +841,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11151「对话里有空消息」：请求内容的问题（同一 body 换任何号都一样）。
+			// 以前它落通用 4xx → 只换号不罚号，轮一圈后拿 503 收场（issue #203：客户端
+			// 看到「服务暂时不可用」，而真实原因只是某条消息内容为空）。这里直接 400 +
+			// 上游原文（含 code/requestId，客户端按它自查），不罚号、不轮转。
+			if kind == upstream.ErrEmptyMessage {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "a message in the conversation has empty content"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "empty_message", msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// 11148 is deterministic for this request body. Return immediately without
 			// rotating accounts or incrementing account failure counters.
 			if kind == upstream.ErrToolCallMismatch {
@@ -1179,6 +1195,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 内容策略拦截：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 首遇由 chatCompletions 内降级重试处理；最终仍拦则回 400
 		// content_blocked（防火墙文案），不再轮转、不暴露账号/冷却/错误码。
+	case upstream.ErrEmptyMessage:
+		// 11151 空消息：请求的问题（同 body 换号结果不变），零动作 —— 不冷却/不熔断/
+		// 不 NoteError，由 chatCompletions 的 fail-fast 分支直接 400 透传（issue #203）。
 	case upstream.ErrPromptTooLong:
 		// 11115「prompt is too long」：请求的问题不是账号的问题（同一 body 换任何
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked

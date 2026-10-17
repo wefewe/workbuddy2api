@@ -31,12 +31,20 @@ type Auth struct {
 	//
 	// 命名注记：Go 不允许字段与方法同名，持久化字段用未导出 realm，计算访问器用
 	// 导出的 Realm()（跨包调用全部走方法）。Parse/SaveAtomic/login 在包内读写字段。
-	realm          string
-	UID            string
-	EnterpriseID   string
-	Nickname       string
-	FilePath       string // 来源文件；refresh 后原子写回此处
+	realm        string
+	UID          string
+	EnterpriseID string
+	Nickname     string
+	FilePath     string // 来源文件；refresh 后原子写回此处
 
+	// ProxyName 账号级出口线路**名**（不是地址），来源 auth 文件顶层 `proxy` 字段，
+	// 由面板的「出口线路」功能写入；线路名 → 代理地址的映射在上游 config.json 的
+	// `proxies` 里。空 = 跟随进程级代理（WB_HTTP_PROXY / 环境变量）。
+	//
+	// 为什么存在这个字段：面板早就能给账号绑线路，但上游此前完全不读它 —— 于是
+	// 「每个号一条出口」只是界面上看起来生效，真正的对话流量还是全池共用宿主出口
+	// （多号同 IP 容易被平台关联）。现在上游按它选 transport（见 upstream.TransportFor）。
+	ProxyName string
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
@@ -230,6 +238,8 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
+			// Proxy 顶层 proxy（线路名，面板写入；见 Auth.ProxyName）。
+			Proxy string `json:"proxy"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -244,6 +254,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
+			ProxyName:    strings.TrimSpace(n.Proxy),
 		}
 	} else {
 		var f struct {
@@ -256,6 +267,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
+			Proxy        string `json:"proxy"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -270,6 +282,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
+			ProxyName:    strings.TrimSpace(f.Proxy),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -308,6 +321,12 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// ProxyName 同理非空才写回：**刷新 token 会整份重建文件**，不保留就等于把面板
+	// 绑好的出口线路静默解绑（出口随之改变，而这类变化没人会发现）。空值不写，
+	// 避免在没绑线路的文件里引入空键。
+	if a.ProxyName != "" {
+		doc["proxy"] = a.ProxyName
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
