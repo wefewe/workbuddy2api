@@ -302,12 +302,15 @@ const expiringWeight = 8.0
 
 // pickWeighted 三因子加权随机（claude-api selectWeightedRandom 参考口径）：
 //
-//		weight = credits 比例 × 10 + 快过期积分占比 × expiringWeight + idleWeight
+//	weight = (credits 比例 × 10 + 快过期积分占比 × expiringWeight + idleWeight) × 手写权重
 //
-//	  - credits 比例 = 该号 credits / 全集最大 credits（避免量纲爆炸；全集口径：
-//	    tier 过滤前的全部 healthy 候选，与截断排序共享基准——见 weighted 预计算注释）
-//	  - 快过期积分占比 = creditsExpiring/credits（×8，issue:积分过期）
-//	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
+// 最后一项即 auth.Auth.PickWeight（面板「权重」，默认 1 = 与改造前逐位一致，
+// issue #187）；它只缩放抽签权重，不改变候选资格。
+//
+//   - credits 比例 = 该号 credits / 全集最大 credits（避免量纲爆炸；全集口径：
+//     tier 过滤前的全部 healthy 候选，与截断排序共享基准——见 weighted 预计算注释）
+//   - 快过期积分占比 = creditsExpiring/credits（×8，issue:积分过期）
+//   - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
 //
 // credits 全 0 时仍按 idle+expiring 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
@@ -388,5 +391,11 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// （原第 3 因子「成功率 EMA ×3」已删，success-ema-review §4：双饱和计数器对
 	// 真实成功率不敏感、成熟池退化为与默认值重合的常数 1.5、失败侧与熔断器
 	// 100% 同源——机制名存实亡且冗余，删除后 weightOf 为三因子。）
+	//
+	// 4. 手写权重乘数（issue #187）：面板给该号设的权重，未设置 = 1（分布与改造前
+	// 逐位一致）。放在**最后乘**而不是压平上面三项：三因子决定「同条件谁更强」，
+	// 权重只放大/缩小这个结论。硬门槛（healthy / 在途 / 成本分层）在本函数之前
+	// 已经过滤完，所以调大权重也不能把冷却号或已实测收费的号塞进候选。
+	w *= e.a.PickWeight()
 	return w
 }
