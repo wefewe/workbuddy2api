@@ -86,6 +86,12 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	// 账号级出口线路（issue #210）：面板绑在线路名上，这里把名字解析成地址。
 	upstream.ConfigureProxies(cfg.Proxies)
+	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
+	// 只看 content 的客户端又空了"变成悬案。
+	upstream.ConfigureReasoningFallback(cfg.ReasoningAsContent == nil || *cfg.ReasoningAsContent)
+	if !upstream.ReasoningFallbackEnabled() {
+		log.Printf("思考通道兜底已关闭：只含 reasoning_content 的回复不会再补成 content")
+	}
 	if names := upstream.RouteNames(); len(names) > 0 {
 		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))

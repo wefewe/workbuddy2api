@@ -218,9 +218,15 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	if created == 0 {
 		created = float64(time.Now().Unix())
 	}
+	// reasoningBackfill（issue #135）：整轮没有正文、也没有工具调用时，把思考
+	// 原文当正文下发 —— 只看 content 的客户端否则会看到空回复。正常轮次零改动。
+	bodyText := content.String()
+	if ReasoningFallbackEnabled() && bodyText == "" && len(toolOrder) == 0 && reasoning.Len() > 0 {
+		bodyText = reasoning.String()
+	}
 	message := map[string]any{
 		"role":    role,
-		"content": content.String(),
+		"content": bodyText,
 	}
 	if reasoning.Len() > 0 {
 		message["reasoning_content"] = reasoning.String()
@@ -489,6 +495,13 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
 	toolCallSeen := map[int]bool{}
 
+	// reasoningBackfill 的整轮状态（issue #135）：是否出现过正文 / 工具调用，
+	// 以及思考通道累积的原文。收尾时若两者都没有而思考有内容，补发一帧正文。
+	// 只在开关打开时维护（关掉时零开销、与旧行为逐字节一致）。
+	sawContent := false
+	sawToolCalls := false
+	var reasoningBuf strings.Builder
+
 	// firstID 透传流的消息级 id 基准：缓存首个非空上游 id，后续帧缺失/空串时复用
 	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
 	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
@@ -527,6 +540,31 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 					return 0, werr
 				}
 				return 1, nil
+			}
+			// reasoningBackfill：记录整轮是否出现正文/工具调用，并累积思考原文。
+			// 放在错误帧早退之后 —— 上游错误帧不属于正常内容，不该参与判定。
+			if ReasoningFallbackEnabled() {
+				if chs, ok := obj["choices"].([]any); ok {
+					for _, ci := range chs {
+						c, _ := ci.(map[string]any)
+						if c == nil {
+							continue
+						}
+						d, _ := c["delta"].(map[string]any)
+						if d == nil {
+							continue
+						}
+						if v, ok := d["content"].(string); ok && v != "" {
+							sawContent = true
+						}
+						if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+							sawToolCalls = true
+						}
+						if v, ok := d["reasoning_content"].(string); ok && v != "" {
+							reasoningBuf.WriteString(v)
+						}
+					}
+				}
 			}
 			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 			stripToolCallNames(obj, toolCallSeen)
@@ -597,6 +635,33 @@ readLoop:
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
+	// reasoningBackfill：整轮无正文、无工具调用，但思考通道有内容 —— 补发一帧
+	// 正文，让只看 content 的客户端拿到输出，而不是判成「模型没有输出」。
+	// 放在 [DONE] 之前，客户端仍按正常流收尾；开关关闭时这段不执行。
+	if ReasoningFallbackEnabled() && !sawContent && !sawToolCalls && reasoningBuf.Len() > 0 {
+		rid := firstID
+		if rid == "" {
+			rid = "chatcmpl-wb2api"
+		}
+		chunk := map[string]any{
+			"id":      rid,
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"choices": []any{map[string]any{
+				"index":         0,
+				"delta":         map[string]any{"content": reasoningBuf.String()},
+				"finish_reason": nil,
+			}},
+		}
+		if raw, merr := json.Marshal(chunk); merr == nil {
+			if _, werr := io.WriteString(w, "data: "+string(raw)+"\n\n"); werr != nil {
+				return werr
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return err
 	}
