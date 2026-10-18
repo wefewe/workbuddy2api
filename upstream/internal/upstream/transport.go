@@ -99,6 +99,21 @@ func newTransport() *http.Transport {
 	}
 }
 
+// DirectRouteName 是账号级「强制直连」的保留线路名（issue #223）。
+//
+// 账号文件里的 proxy 为空表示「默认出口」= 可能走进程级环境代理；要表达
+// 「这个号绝不走代理」，需要显式写入 __direct__。保留名不能同时在 config.json
+// 的 proxies 里使用（ConfigureProxies 会忽略它），避免语义歧义。
+const DirectRouteName = "__direct__"
+
+var directTransport = sync.OnceValue(func() *http.Transport {
+	tr := newTransport()
+	// newTransport 默认跟随 HTTP(S)_PROXY；直连必须显式清空。空闲连接池与
+	// 其它线路分开（每个 Transport 自带池），不会把代理连接复用给直连。
+	tr.Proxy = nil
+	return tr
+})
+
 // ── 账号级出口线路（issue #210）──────────────────────────────────────────
 //
 // 面板早就能给账号绑一条命名线路（`auths/*.json` 顶层的 `proxy` 字段），但上游
@@ -125,7 +140,9 @@ func ConfigureProxies(table map[string]string) {
 	for name, addr := range table {
 		n := strings.TrimSpace(name)
 		v := strings.TrimSpace(addr)
-		if n != "" && v != "" {
+		// 保留名由 TransportFor 直接处理，不能出现在线路表里（否则一个名为
+		// __direct__ 的代理线路会被静默忽略，排障时找不到原因）。
+		if n != "" && n != DirectRouteName && v != "" {
 			routes.table[n] = v
 		}
 	}
@@ -172,7 +189,12 @@ func normalizeProxyURL(raw string) (*url.URL, error) {
 //   - 已配置 → 该线路专属 Transport（按名缓存，连接池与默认分开）
 //   - 未配置 → error（不静默直连；错误里带线路名，便于对照 config.json）
 func TransportFor(name string) (*http.Transport, error) {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == DirectRouteName {
+		// 强制直连：Proxy=nil，连接池独立缓存（sync.OnceValue）。
+		return directTransport(), nil
+	}
+	if name == "" {
 		return newTransport(), nil
 	}
 	routes.mu.RLock()

@@ -9,5 +9,7 @@
   "0008-account-manual-weight.patch": "a43e32e0461a4d585eff1f21a37de2135d6447401ab78146f7cb16645e61348b",
   "0009-reasoning-as-content.patch": "f037cd64a5325830b7663ca90f34b9a29ec55770371145e12789d4debb9f7f51",
   "0010-reasoning-frame-order.patch": "7e599ea9d07edbe1d4843a9f55d284d1669097f20d5b317d51fc5668d2e61051",
-  "0011-fix-cooldown-test-clock.patch": "4d2bf7f68b449ed445fe4f98082e0b98cb76bbbbe39a9b00d9295bfd94e4f81b"
+  "0011-fix-cooldown-test-clock.patch": "4d2bf7f68b449ed445fe4f98082e0b98cb76bbbbe39a9b00d9295bfd94e4f81b",
+  "0012-expert-lighthouse-real-chat.patch": "b7c2241b34760b4c08ac9a3e9bcf9b01719dbfa67139a90c58e010d5b388eed2",
+  "0013-account-direct-route.patch": "5e2eea2795bf3a6d226ef4f82fa967e74c4aab44ac236c69ba49f173104cacd5"
 }
