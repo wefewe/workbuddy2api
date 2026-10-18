@@ -11,10 +11,10 @@ import (
 // reasoning_content 里，只看 content 的客户端会显示空回复。
 //
 // 契约（刻意很窄）：
-//
-//	· 整轮**既无正文、也无工具调用** → 把思考原文同时作为 content 下发；
-//	· 有正文 / 有工具调用的正常轮次 → 零改动；
-//	· 开关关闭 → 与旧行为逐字节一致。
+//   - 整轮**既无正文、也无工具调用** → 把思考原文同时作为 content 下发；
+//   - 有正文 / 有工具调用的正常轮次 → 零改动；
+//   - 开关关闭 → 与旧行为逐字节一致；
+//   - **帧序**：补发的正文必须早于 finish_reason（客户端看到 finish 就停止累积）。
 func withReasoningFallback(t *testing.T, on bool) {
 	t.Helper()
 	old := ReasoningFallbackEnabled()
@@ -134,13 +134,16 @@ func TestAggregateFallbackCanBeDisabled(t *testing.T) {
 	}
 }
 
-// 流式：收尾前一帧把思考补成 content；正常轮次不多发帧。
+// 流式：补发的正文必须出现在 finish_reason **之前** —— 很多 OpenAI 兼容客户端
+// 收到 finish 就停止累积，补在后面的正文等于没发（2.2.0 的回归点）。
 func TestStreamBackfillsReasoningAsContent(t *testing.T) {
 	withReasoningFallback(t, true)
 	raw := strings.Join([]string{
 		sseFrame(t, map[string]any{"role": "assistant", "reasoning_content": "思考A"}),
 		"",
 		sseFrame(t, map[string]any{"reasoning_content": "思考B"}),
+		"",
+		`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 		"",
 		"data: [DONE]",
 		"",
@@ -150,12 +153,53 @@ func TestStreamBackfillsReasoningAsContent(t *testing.T) {
 		t.Fatalf("stream: %v", err)
 	}
 	out := rec.Body.String()
-	if !strings.Contains(out, `"content":"思考A思考B"`) {
-		t.Errorf("流里没有补发的正文帧：\n%s", out)
+	contentPos := strings.Index(out, `"content":"思考A思考B"`)
+	finishPos := strings.Index(out, `"finish_reason":"stop"`)
+	donePos := strings.Index(out, "[DONE]")
+	if contentPos < 0 {
+		t.Fatalf("流里没有补发的正文帧：\n%s", out)
 	}
-	// 补发帧必须在 [DONE] 之前
-	if strings.Index(out, `"content":"思考A思考B"`) > strings.Index(out, "[DONE]") {
-		t.Errorf("补发帧出现在 [DONE] 之后：\n%s", out)
+	if finishPos < 0 || contentPos > finishPos {
+		t.Errorf("补发正文必须早于 finish_reason（content=%d finish=%d done=%d）：\n%s",
+			contentPos, finishPos, donePos, out)
+	}
+	if finishPos > donePos {
+		t.Errorf("finish 出现在 [DONE] 之后：\n%s", out)
+	}
+}
+
+// finish 之后常跟一帧纯 usage（choices 为空）。它也要跟着缓冲，不能在补发正文之前
+// 漏出去 —— 否则客户端同样会认为「这一轮结束了」。
+func TestStreamBackfillKeepsUsageAfterFinish(t *testing.T) {
+	withReasoningFallback(t, true)
+	raw := strings.Join([]string{
+		sseFrame(t, map[string]any{"reasoning_content": "思考"}),
+		"",
+		`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl-x","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader(raw), nil); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	out := rec.Body.String()
+	contentPos := strings.Index(out, `"content":"思考"`)
+	finishPos := strings.Index(out, `"finish_reason":"stop"`)
+	// 用 usage 帧里的实际字段定位：normalizeFrame 会给**每一帧**补 "usage":null，
+	// 直接找 `"usage":` 会命中第一帧。
+	usagePos := strings.Index(out, `"completion_tokens":2`)
+	donePos := strings.Index(out, "[DONE]")
+	if contentPos < 0 || usagePos < 0 || finishPos < 0 {
+		t.Fatalf("missing frames: content=%d finish=%d usage=%d\n%s",
+			contentPos, finishPos, usagePos, out)
+	}
+	if !(contentPos < finishPos && finishPos < usagePos && usagePos < donePos) {
+		t.Errorf("帧序应为 content → finish → usage → [DONE]（%d/%d/%d/%d）：\n%s",
+			contentPos, finishPos, usagePos, donePos, out)
 	}
 }
 
@@ -165,6 +209,8 @@ func TestStreamKeepsNormalTurnsUntouched(t *testing.T) {
 		sseFrame(t, map[string]any{"reasoning_content": "思考"}),
 		"",
 		sseFrame(t, map[string]any{"content": "正文"}),
+		"",
+		`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 		"",
 		"data: [DONE]",
 		"",
@@ -178,12 +224,20 @@ func TestStreamKeepsNormalTurnsUntouched(t *testing.T) {
 	if strings.Contains(out, `"content":"思考"`) {
 		t.Errorf("有正文的轮次被补发了思考帧：\n%s", out)
 	}
+	// 正常轮次的 finish 与 DONE 仍在
+	finishPos := strings.Index(out, `"finish_reason":"stop"`)
+	donePos := strings.Index(out, "[DONE]")
+	if finishPos < 0 || donePos < 0 || finishPos > donePos {
+		t.Errorf("正常轮次的收尾帧丢了：\n%s", out)
+	}
 }
 
 func TestStreamBackfillCanBeDisabled(t *testing.T) {
 	withReasoningFallback(t, false)
 	raw := strings.Join([]string{
 		sseFrame(t, map[string]any{"reasoning_content": "思考"}),
+		"",
+		`data: {"id":"chatcmpl-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 		"",
 		"data: [DONE]",
 		"",

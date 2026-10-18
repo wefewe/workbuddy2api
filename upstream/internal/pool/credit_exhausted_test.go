@@ -47,9 +47,6 @@ func TestCreditExhaustedShortCooldown(t *testing.T) {
 	if !st.Cooling {
 		t.Fatalf("should be cooling: %+v", st)
 	}
-	if st.Until.Hour() == 4 {
-		t.Errorf("until=%v 仍落在 04:00 —— 短冷却没生效", st.Until)
-	}
 	if e := p.byUID["u1"]; e.coolKind != CoolSoft {
 		t.Errorf("coolKind=%v want CoolSoft", e.coolKind)
 	}

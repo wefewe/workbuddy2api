@@ -1,0 +1,13 @@
+{
+  "0001-tool-result-pairing.patch": "bbfdb3361182f44335313e76a283a3cbb874b4d87326b59d4be0a1c254c290a3",
+  "0002-listing-compat.patch": "58dc03f3858678060b654b37d374e78199127a4f819e3cb0bc9b9d6f627f670f",
+  "0003-random-daily-schedule.patch": "dcac2f6b81155d7e8aa142f9b6072b3b06131edc7da19dfd93324f4fa9f4fbac",
+  "0004-credit-exhausted-cooldown.patch": "e5a62f9ce145815d69553f066bdd551b5c92cb99b9c16cbf81a1d4959926532b",
+  "0005-conversation-id-header-family.patch": "11f5901c9fa2a9d39d53f3c091b3488ec869013f9d61f3810715a7449707d76a",
+  "0006-channel-check-console-fallback.patch": "a85b16e5b03a547667a1eb38054210a728f9df30fa747c3e743be4e5bc53eb67",
+  "0007-account-egress-and-request-level-errors.patch": "9ba12c4fc861edab35f9185cdf53977080d74c006deb46cfe69b53ea17a9ca6f",
+  "0008-account-manual-weight.patch": "a43e32e0461a4d585eff1f21a37de2135d6447401ab78146f7cb16645e61348b",
+  "0009-reasoning-as-content.patch": "f037cd64a5325830b7663ca90f34b9a29ec55770371145e12789d4debb9f7f51",
+  "0010-reasoning-frame-order.patch": "7e599ea9d07edbe1d4843a9f55d284d1669097f20d5b317d51fc5668d2e61051",
+  "0011-fix-cooldown-test-clock.patch": "4d2bf7f68b449ed445fe4f98082e0b98cb76bbbbe39a9b00d9295bfd94e4f81b"
+}
