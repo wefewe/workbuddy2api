@@ -105,7 +105,7 @@ func globalEffortChatSrv(t *testing.T, modelsBody string, capture func([]byte)) 
 }
 
 // TestGlobalEffortDowngradeStatic 探测失败（负缓存）→ global 请求按静态兜底表降级：
-// deepseek-v4.1-flash 只认 high，客户端传 low → 降级 high（issue #84 核心）。
+// deepseek-v4.1-flash 不认 low，客户端传 low → 降级 high（issue #84 核心）。
 func TestGlobalEffortDowngradeStatic(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -133,6 +133,40 @@ func TestGlobalEffortDowngradeStatic(t *testing.T) {
 	}
 	if got, _ := m["reasoning_effort"].(string); got != "high" {
 		t.Errorf("reasoning_effort=%v want high (global 静态兜底降级 low→high)", m["reasoning_effort"])
+	}
+}
+
+// TestGlobalEffortRemoteLagKeepsMax issue #238：接口元数据仍只回 high，但官方客户端
+// 已支持 Max；请求传 max 不能被降级掉（否则网关永远用不上新档位）。
+func TestGlobalEffortRemoteLagKeepsMax(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	var outbound []byte
+	srv := globalEffortChatSrv(t, `{"code":0,"data":{"models":[
+		{"id":"deepseek-v4.1-flash","reasoning":{"supportedEfforts":["high"],"defaultEffort":"high"}}
+	]}}`, func(b []byte) { outbound = b })
+	defer srv.Close()
+
+	c := &Client{
+		HTTP:           &http.Client{},
+		ChatBaseGlobal: strings.TrimSuffix(srv.URL, "/"),
+		GlobalEnabled:  true,
+	}
+	c.FetchGlobalModels(globalAcct())
+
+	rc, status, _, err := c.ChatStream(globalAcct(), []byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
+	if err != nil || status != 200 {
+		t.Fatalf("chat status=%d err=%v", status, err)
+	}
+	rc.Close()
+
+	var m map[string]any
+	if err := json.Unmarshal(outbound, &m); err != nil {
+		t.Fatalf("unmarshal outbound: %v (%s)", err, outbound)
+	}
+	if got, _ := m["reasoning_effort"].(string); got != "max" {
+		t.Errorf("reasoning_effort=%v want max (issue #238 产品已支持 Max)", m["reasoning_effort"])
 	}
 }
 

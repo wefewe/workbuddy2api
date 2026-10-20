@@ -8,7 +8,7 @@
 // 档位值照抄参考仓库 dsh-codearts：CN/CodeBuddy 面取 src/product.ts CODEBUDDY_FALLBACK_MODELS
 // ∪ src/buddy-adapter.ts:126-137 REASONING_EFFORTS；global/WorkBuddy 面取 src/product.ts
 // WORKBUDDY_FALLBACK_MODELS。两个 realm 对同一模型给出不同档位（如 deepseek-v4.1-flash：
-// CN 三档 ['low','high','max']、global 仅 ['high']），故**按 realm 分表**，绝不混用。
+// CN 三档 ['low','high','max']、global ['high','max']），故**按 realm 分表**，绝不混用。
 //
 // 只列**可枚举**档位的模型；仅有固定默认档（glm-5.1/kimi-* 的 medium）同样入表，
 // 但其档位是「可枚举单档」而非「无选择器」，照抄参考仓库如实暴露。
@@ -42,15 +42,15 @@ var cnEffortFallback = map[string]effortCap{
 }
 
 // globalEffortFallback global / WorkBuddy 国际版面静态兜底表。
-// 注意 deepseek-v4.1-flash 在国际版**只有 ['high']**（product.ts:190 实测 IDE 缓存），
-// 与 CN 面的三档刻意不同——往 WorkBuddy 上游发 low/max 是非法参数 400。
+// deepseek-v4.1-flash 在国际版为 ['high','max']（2026-10 issue #238：官方客户端已可选
+// Max），与 CN 面的三档仍不同——low 不是国际版的合法档位。
 var globalEffortFallback = map[string]effortCap{
 	"fast-model":          {efforts: []string{"medium"}},
 	"balanced-model":      {efforts: []string{"medium"}},
 	"primary-model":       {efforts: []string{"high"}},
 	"hy4-preview-f":       {efforts: []string{"high"}, defaultEffort: "high"},
 	"hy3":                 {efforts: []string{"low", "high"}, defaultEffort: "high"},
-	"deepseek-v4.1-flash": {efforts: []string{"high"}},
+	"deepseek-v4.1-flash": {efforts: []string{"high", "max"}, defaultEffort: "high"},
 	"gpt-6-astra":         {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},
 	"gpt-5.6-sol":         {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},
 	"gpt-5.6-terra":       {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},
@@ -63,6 +63,29 @@ var globalEffortFallback = map[string]effortCap{
 	"glm-5.2":             {efforts: []string{"high", "xhigh"}, defaultEffort: "high"},
 	"kimi-k3":             {efforts: []string{"medium"}},
 	"kimi-k2.6":           {efforts: []string{"medium"}},
+}
+
+// globalEffortExtras 产品能力已更新、模型接口 supportedEfforts 还没跟上的补档。
+// 2026-10 issue #238：国际版官方客户端已可选 Max，接口仍只回 ['high']；
+// 只在已有档位上追加，不给未知模型凭空造档位。
+var globalEffortExtras = map[string][]string{
+	"deepseek-v4.1-flash": {"max"},
+}
+
+// extendGlobalEfforts 把 globalEffortExtras 合并进已有档位（去重、保持原顺序）。
+// 无补档或原档位为空时原样返回（不为未知模型造档位）。
+func extendGlobalEfforts(model string, efforts []string) []string {
+	extras := globalEffortExtras[model]
+	if len(extras) == 0 || len(efforts) == 0 {
+		return efforts
+	}
+	out := append([]string(nil), efforts...)
+	for _, extra := range extras {
+		if !containsEffort(out, extra) {
+			out = append(out, extra)
+		}
+	}
+	return out
 }
 
 // staticEffortCap 按 realm 取静态兜底条目；未命中返回 zero effortCap（efforts=nil）。
@@ -92,6 +115,9 @@ func EffortListing(realm, model string, remoteEfforts []string, remoteDefault st
 		src = effortCap{efforts: remoteEfforts, defaultEffort: remoteDefault}
 	default:
 		src = staticEffortCap(realm, model)
+	}
+	if realmKey(realm) == "global" {
+		src.efforts = extendGlobalEfforts(model, src.efforts)
 	}
 	if len(src.efforts) == 0 {
 		return nil, ""
@@ -140,6 +166,10 @@ func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[strin
 		if v != "" {
 			defs[id] = v
 		}
+	}
+	// 远端元数据滞后时按产品能力补档（issue #238）。
+	for id, v := range efforts {
+		efforts[id] = extendGlobalEfforts(id, v)
 	}
 	return efforts, defs
 }
