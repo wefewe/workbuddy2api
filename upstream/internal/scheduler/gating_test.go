@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -24,7 +25,9 @@ func TestGlobalAccountsSkipCheckinTravel(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		http.Error(w, "no upstream call expected for global", 404)
+		w.Header().Set("Content-Type", "application/json")
+		// 只读余额查询要成功，避免 404 触发 /v2 → fallback 的第二次请求。
+		_, _ = io.WriteString(w, `{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}`)
 	}))
 	defer srv.Close()
 
@@ -32,15 +35,16 @@ func TestGlobalAccountsSkipCheckinTravel(t *testing.T) {
 	// 显式 realm=global（下行 Domain 兜底场景在 auth 包单测覆盖，这里直接构造 global）。
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, GlobalEnabled: true}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL, GlobalEnabled: true}
 	s := New(Config{Pool: p, Upstream: up})
 
-	// 签到/旅行循环：global 账号不应发起任何上游调用。
+	// 签到/旅行循环：global 账号不签到、不旅行，但会做**一次只读余额查询**
+	// （issue #228：否则 pool credits 恒 0，权重里的余额因子失效）。
 	s.CheckinAll()
 	s.RunTravelNow()
 
-	if n := calls.Load(); n != 0 {
-		t.Errorf("global account checkin/travel upstream calls=%d want 0（checkin/travel 仍跳过）", n)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("global account checkin/travel upstream calls=%d want 1（仅只读余额查询）", n)
 	}
 }
 
@@ -53,14 +57,16 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		http.Error(w, "no upstream call expected for global", 404)
+		w.Header().Set("Content-Type", "application/json")
+		// 只读余额查询要成功，避免 404 触发 /v2 → fallback 的第二次请求。
+		_, _ = io.WriteString(w, `{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}`)
 	}))
 	defer srv.Close()
 
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
 	out, err := s.CheckinAll()
@@ -76,8 +82,8 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	if out[0].Detail != "global" {
 		t.Errorf("detail=%q want global", out[0].Detail)
 	}
-	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0", calls.Load())
+	if calls.Load() != 1 {
+		t.Errorf("upstream calls=%d want 1（仅只读余额查询）", calls.Load())
 	}
 }
 
@@ -192,7 +198,7 @@ func TestRunActivityNowGlobalReportFailWarnsButOthersProceed(t *testing.T) {
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
 	p.Add(&auth.Auth{UID: "cn1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, GlobalEnabled: true}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL, GlobalEnabled: true}
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 1})
 
 	s.RunActivityNow() // 不应 panic，g1 的 report 失败只记 WARN
@@ -214,7 +220,7 @@ func TestRunKeepaliveStillRefreshesGlobal(t *testing.T) {
 		Domain: "www.workbuddy.ai"}
 	p.Add(a)
 
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 	s.RunKeepaliveNow()
 	if f.refreshCalls.Load() != 1 {

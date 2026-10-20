@@ -912,6 +912,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			} else if upstream.IsTruncatedStreamError(sErr) {
+				// 上游 200 但流中途断掉（转发过内容帧、无 finish_reason、无 [DONE]）：
+				// StreamHint 已在 [DONE] 之前补一条 error 帧（客户端由此判失败而非
+				// 「完成」）。这里同样把日志/状态收敛到 502 —— 不这么做，日志里留下
+				// 的是一条 tok=... 的假成功，正是本问题此前查不出来的原因。
+				st.status = http.StatusBadGateway
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream truncated (no finish_reason/[DONE])", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
