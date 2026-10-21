@@ -14,5 +14,7 @@
   "0013-account-direct-route.patch": "5e2eea2795bf3a6d226ef4f82fa967e74c4aab44ac236c69ba49f173104cacd5",
   "0014-truncated-stream-signal.patch": "f984101e94592bbb8e7c72ee18fcfc16014c24e264b66c99dd7a08fa66f24aff",
   "0015-global-credits-refresh.patch": "e28cfabf96c21e71bda8cd805087095a73f51a1197fbc097b27956d9f12f99b7",
-  "0016-global-deepseek-max-effort.patch": "6a3e395423a1cc136b1f1d8385b497ded9776b1bc41e5a1ffca36c84d5b88fd1"
+  "0016-global-deepseek-max-effort.patch": "6a3e395423a1cc136b1f1d8385b497ded9776b1bc41e5a1ffca36c84d5b88fd1",
+  "0017-dsh-system-prompt-fingerprint.patch": "4d44cbefaf382dc02609730a7998a6c87c7553588df89ccc135e871edfbdba2e",
+  "0018-console-fallback-model-missing.patch": "ef36e101c60fa7d103be4f4c555aecff55e5ae1caba61e06f8871d379a45c384"
 }

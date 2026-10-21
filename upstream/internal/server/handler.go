@@ -1073,6 +1073,8 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让（复用 modelCooldowns
 //     机制，Until=指数退避 TTL，选号侧 healthyForModel 避开，切模型即可用）。
+//   - ErrFallbackModelMissing → 回退路径上的 11102（issue #245）：零动作（不冷却/不熔断/
+//     不 NoteError），仍然轮转 —— 失败的是路径不是账号，写成模型级冷却会把整池打穿。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断；ErrClient
 //     额外喂连败计数（NoteFailures，issue #114）：未知 4xx 连败 N 次临时出池——
 //     「不知道原因的兜底」，与冷却「知道原因的惩罚」并存取更长者不叠加（health
@@ -1218,6 +1220,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
 		// ——不同账号可能有不同的模型权限，值得换号再试一次。
+	case upstream.ErrFallbackModelMissing:
+		// 回退路径（/console）报的 11102（issue #245）：只说明「这条路径没有这个模型」，
+		// 不是「该账号缺这个模型」。零动作（不冷却/不熔断/不 NoteError），仍然轮转 ——
+		// 换个号可能压根不需要回退（渠道校验与账号灰度有关），而写成模型级冷却会让
+		// 十几个号轮一圈就把整池打满，对外变成 503 no_healthy_account。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶

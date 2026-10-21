@@ -42,6 +42,11 @@ const (
 	// ErrEmptyMessage 11151「a message has empty content」→ 请求级错误：同 body 换
 	// 任何账号都是同一结果，换号只会白扔健康号配额、最后把 400 包装成 503（issue #203）。
 	ErrEmptyMessage
+	// ErrFallbackModelMissing 回退路径（/console）报的 11102（issue #245）→ 请求级
+	// 错误：它只说明「这条路径没有这个模型」，不构成「该账号缺这个模型」的证据。
+	// 不能落 ErrModelBlocked —— handler 会写 6 小时 (账号,模型) 负缓存，十几个号轮
+	// 一圈就是整池 503；也不该按 ErrClient 喂连败计数（失败的是路径不是账号）。
+	ErrFallbackModelMissing
 )
 
 func (k ErrKind) String() string {
@@ -74,6 +79,8 @@ func (k ErrKind) String() string {
 		return "empty_message"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
+	case ErrFallbackModelMissing:
+		return "fallback_model_missing"
 	case ErrClient:
 		return "client"
 	default:
@@ -1239,6 +1246,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+			// 回退路径上的 11102 降级（issue #245）：能走到 /console 是因为 /v2 判了渠道
+			// 校验，而 /console 本来就可能不提供这个模型 —— 11102 只说明「这条路径没有」，
+			// 不是「该账号缺这个模型」。照 ErrModelBlocked 处理，handler 会写 (账号,模型)
+			// 6 小时负缓存，逐个账号轮过去就是整池 503 no_healthy_account，比不换路径更糟。
+			// 也不按 ErrClient 处理：连败计数是账号健康信号，这里失败的是路径不是账号。
+			if i > 0 && kind == ErrModelBlocked {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，按请求级处理（不写模型冷却）",
+					logfmt.Label(a.UID, a.Nickname), path, kind)
+				kind = ErrFallbackModelMissing
+			}
 			// 路径级拒绝 → 换下一个候选路径再试，**不**把它当账号问题。
 			//   · 渠道校验（11128/11-128）：/v2 新增强校验，/console 放行（见 chatPaths）；
 			// 触发条件**只有渠道校验**：404/405 不回落是 #119 的刻意取舍（/console 挂

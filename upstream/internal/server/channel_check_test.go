@@ -105,3 +105,40 @@ func TestChatChannelCheckNeverDisables(t *testing.T) {
 		t.Errorf("冷却原因应写明是渠道校验，便于排障：%q", st.Reason)
 	}
 }
+
+// issue #245：回退到 /console 拿到的 11102 不得写 (账号,模型) 负缓存。
+//
+// 现场：15 个号跑几小时后全部软冷却、所有请求 503。原因是回退路径的 11102 被当成
+// 「该账号缺这个模型」，写了 6 小时模型级冷却，逐个账号轮过去就把整池打穿。
+func TestConsoleFallbackModelMissingDoesNotBlockModel(t *testing.T) {
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/console/chat/completions") {
+				return sseResponse(400, `{"code":11102,"msg":"model [glm-5.2] service info not found"}`), nil
+			}
+			return sseResponse(400, channelCheckBody()), nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: 600 * time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code == 200 {
+		t.Fatalf("上游两条路径都失败，不该返回 200：%s", rec.Body.String())
+	}
+
+	st, _ := p.Status("u1")
+	if len(st.RateLimitedModels) != 0 {
+		t.Errorf("回退路径的 11102 不该写模型冷却，got %+v", st.RateLimitedModels)
+	}
+	if st.ConsecutiveFails != 0 {
+		t.Errorf("失败的是路径不是账号，不该喂连败计数，got %d", st.ConsecutiveFails)
+	}
+	if st.Cooling || st.Disabled {
+		t.Errorf("账号不该被冷却/禁用: cooling=%v disabled=%v", st.Cooling, st.Disabled)
+	}
+}

@@ -18,8 +18,8 @@ var sanitizeFeatures = []string{
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-	"11128",                      // 上游反探测：裸数字错误码
+	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"11128",                                           // 上游反探测：裸数字错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -78,6 +78,40 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
+// sanitizeDshRe 通配层：客户端「自我介绍句」的模板匹配（issue #246）。
+//
+// 上游不只看具体品牌，它把一整类自我介绍句当指纹：DeepSeek Harness（DSH）把
+// system 首句写成 "You are an AI agent powered by DeepSeek Harness."，
+// 命中的是这类**句式结构**而不是品牌名——把品牌换成别的、或换成
+// "You are an AI assistant built on …" / "You are an assistant built on …"
+// （DSH 的第二句就是 "You are a coding agent powered by the <model> model."）
+// 同样 400 code=11-128（issue #246 逐项实测，与请求规模、tools、stream 无关）。
+//
+// 所以这里按句式而不是按品牌匹配，整句换成通用自我介绍：
+//
+//	"You are an [AI] [coding] agent|assistant (powered by|built on) … ."
+//
+// 为什么不用逐字替换表（sanitizeRewrites）：品牌/模型名是变量（"DeepSeek Harness"、
+// "the deepseek-v4.1-flash model"），逐字表一旦漏了某个变体就静默失效——这正是
+// sanitizeFeatures 那条大小写敏感快速路径踩过的坑（原文 "AI agent" 大写，小写特征
+// 串永远命中不到，两句根本进不了清洗分支）。
+//
+// 三个边界细节：
+//   - 句尾按「点 + 空白/行尾」收口，不能用 `[^\n]*\.` 直到第一个点为止：
+//     模型名自带点（deepseek-v4.1-flash），那样只会吃掉 "…v4." 留下 "1-flash model."。
+//     `{0,120}` 是宽松上限，防止某行没有可用的句尾时一路吃到行尾。
+//   - 整句（含句号）一起替换：只改前半句会留下 "You are a helpful AI assistant.DeepSeek
+//     Harness." 这种残句；替换串自带句号，语义上就是「一个普通的助手」。
+//   - 命中位置不限行首：真实请求里这句是 system 第一条，但客户端也可能把它嵌在
+//     模板里（"<system>You are …"）。放宽的代价只是把一句自我介绍换个说法。
+var sanitizeDshRe = regexp.MustCompile(
+	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on) [^\n]{0,120}?\.(\s|$)`)
+
+// sanitizeDshRepl 是上面那句的替身：中性、无品牌，不含任何已知指纹片段。
+// `${1}` 把句尾那个空白/行尾原样接回去——不接的话 "…Harness. Use the read tool"
+// 会粘成 "assistant.Use"，把两条指令并成一条。
+const sanitizeDshRepl = "You are a helpful AI assistant.${1}"
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
@@ -86,6 +120,7 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -111,6 +146,13 @@ func hasFingerprint(text string) bool {
 		if strings.Contains(text, f) {
 			return true
 		}
+	}
+	// DSH 句式指纹（见 sanitizeDshRe）：**必须在这里也认**，否则预检直接
+	// return，改写层根本执行不到——issue #246 里上游 hub 版的补丁就踩过这个
+	// 坑：特征表是大小写敏感的 strings.Contains，而原文是 "AI agent"，
+	// 补进去的小写串永远命中不到。本正则自带 (?i)，不依赖原文大小写。
+	if sanitizeDshRe.MatchString(text) {
+		return true
 	}
 	return sanitizeBareHdrRe.MatchString(text)
 }
