@@ -590,3 +590,78 @@ func TestPrepareBodySanitizesDshPrompt(t *testing.T) {
 		t.Errorf("替换文本缺失: %s", out)
 	}
 }
+
+// ── issue #250：DSH 运行时上下文「Web GUI」跨句指纹 ─────────────────────
+//
+// 与 #246 的身份句指纹是**两套规则**：本条必须两句连续出现才命中——
+// 单独第一句、单独第二句都放行（各 200）；只差一个字符就失败
+// （前缀 220 成功 / 221 失败），说明上游匹配的是跨句的连续文本。
+// 因此不能只改一句，必须动到段落里的品牌短语才能拆开匹配。
+const dshWebGuiBlock = `You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.`
+
+func TestDshWebGuiBlockRewritten(t *testing.T) {
+	out := sanitizeText(dshWebGuiBlock)
+	if strings.Contains(out, "DeepSeek Harness Web GUI") {
+		t.Errorf("指纹残留: %q", out)
+	}
+	if !strings.Contains(out, "DeepSeek-Harness Web GUI") {
+		t.Errorf("改写文本缺失: %q", out)
+	}
+	// 除品牌短语外内容不得改动（这段是工具/行为契约）。
+	if restored := strings.ReplaceAll(out, "DeepSeek-Harness Web GUI", "DeepSeek Harness Web GUI"); restored != dshWebGuiBlock {
+		t.Errorf("段落其他内容被改动:\n 得到 %q\n 期望 %q", restored, dshWebGuiBlock)
+	}
+}
+
+// 预检必须认这段，否则 hasFingerprint 提前 return、改写层执行不到。
+func TestDshWebGuiFingerprintDetected(t *testing.T) {
+	if !hasFingerprint(dshWebGuiBlock) {
+		t.Error("hasFingerprint 应认得 Web GUI 段落")
+	}
+	if !hasFingerprint("through the deepseek harness web gui") {
+		t.Error("大小写变体应识别")
+	}
+}
+
+// 幂等：PrepareBody 与 ChatStream 各预处理一次。
+func TestDshWebGuiRewriteIdempotent(t *testing.T) {
+	once := sanitizeText(dshWebGuiBlock)
+	if twice := sanitizeText(once); twice != once {
+		t.Errorf("非幂等: %q -> %q", once, twice)
+	}
+}
+
+// 反例：不含该品牌短语的普通文本不得被改写。
+func TestDshWebGuiPlainTextNotTouched(t *testing.T) {
+	for _, in := range []string{
+		"You are interacting with the user through a web GUI.",
+		"DeepSeek Harness is a coding agent runtime.",
+		"I like the Web GUI.",
+		"See the docs for the DeepSeek Harness runtime context.",
+	} {
+		if out := sanitizeText(in); out != in {
+			t.Errorf("不应改写: %q -> %q", in, out)
+		}
+	}
+}
+
+// 出站边界：developer 消息（DSH 用它承载系统提示词）也要净化。
+func TestPrepareBodySanitizesDshWebGui(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"model": "deepseek-v4.1-flash",
+		"messages": []any{
+			map[string]any{"role": "developer", "content": dshWebGuiBlock},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := PrepareBodyOpt(payload, true)
+	if strings.Contains(string(out), "DeepSeek Harness Web GUI") {
+		t.Errorf("PrepareBody 未净化 Web GUI 指纹: %s", out)
+	}
+	if !strings.Contains(string(out), "DeepSeek-Harness Web GUI") {
+		t.Errorf("替换文本缺失: %s", out)
+	}
+}
