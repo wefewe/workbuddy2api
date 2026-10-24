@@ -98,7 +98,7 @@ func main() {
 	} else {
 		log.Printf("未配置出口线路（config.json 的 proxies 段）：账号绑定的线路名会明确报错，不会静默直连")
 	}
-	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为）               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetCreditExhausted(cfg.CreditExhaustedDur) // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为）               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 
@@ -119,6 +119,10 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏，
 			// 见 wiring.go）；裸名走 cn（现状零回归）。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			// 首绑按三因子权重分配（issue #265）：粘性命中即定，若首绑仍按哈希取模，
+			// 「快过期积分优先消耗」这条池权重在默认配置下就永远轮不到——带会话标识的
+			// 请求首轮绑定后滚动续期，压根走不到 Pool.pick。
+			PickForModel: realmAwareWeightedPick(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()

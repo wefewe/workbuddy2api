@@ -4,7 +4,8 @@
 // 但改为纯内存 + redisstore 异步镜像：
 //   - 命中走 RLock 快查（绝大多数请求已绑定）；
 //   - 未命中/失效走写锁 re-check 后分配，避免同 key 并发重复分配（TOCTOU 防护）；
-//   - 分配优先"空闲账号"（未绑定任何会话的可用号）哈希，其次全池哈希（双段策略）；
+//   - 分配优先"空闲账号"（未绑定任何会话的可用号），其次全池（双段策略）；
+//     段内默认按哈希取模，注入 PickForModel 时改按账号池三因子权重选号（issue #265）；
 //   - LastActive 滚动续期，TTL 过期由后台 GC 或快路径惰性过期清理；
 //   - 每次绑定变更 fire-and-forget 镜像到 redisstore（防重启丢粘性）。
 package session
@@ -42,6 +43,20 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// PickForModel 在给定候选集内按账号池真实权重选一个 uid（空串 = 该集合此刻无可用）。
+	// 供粘性**首绑**使用（issue #265）；nil 时回落 hashIndex 稳定散列（旧行为，
+	// 无 pool 依赖的调用方与既有测试保留该语义）。
+	//
+	// 为什么传候选集而不只是 model：双段策略（优先未绑定任何会话的空闲号）属于路由侧
+	// 职责，pool 只在"给定候选集内"回答谁更该先被消耗——两个包的边界因此不互相侵入。
+	//
+	// 为什么需要它：哈希取模只看 key 字节，不看积分余额、快过期积分、闲置时长，于是
+	// pool 里为「积分过期」设计的三因子权重在默认开启的粘性下几乎失效——带会话标识的
+	// 请求在首轮就被哈希分配并滚动续期，永远走不到 Pool.pick。
+	//
+	// 实现方注意：本回调在 Router 写锁内被调用，实现不得回调本 Router（会有死锁风险），
+	// 也不应长时间阻塞。
+	PickForModel func(model string, candidates []string) string
 }
 
 // Router 会话粘性路由器。
@@ -188,7 +203,28 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if len(pool2) == 0 {
 		pool2 = uids
 	}
-	uid := pool2[hashIndex(key, len(pool2))]
+	// 段内选谁（issue #265）：
+	//   注入 PickForModel → 按账号池三因子权重（credits / 快过期积分 / 闲置）选，
+	//     让「快过期积分优先消耗」在粘性首绑上同样成立；
+	//   未注入 / 回调给出空串或候选集外的 uid → 回落 hashIndex 稳定散列（旧语义）。
+	// 为什么要校验返回值落在 pool2 内：回调按池内实时状态过滤，可能刚好把候选全部滤掉
+	// （返回空串，属正常）；但若实现侧给了一个不在候选里的 uid，绑上去就是一个本不该
+	// 参与本模型/本段分配的号——那正是「粘性钉在不可用号上反复失败」的老问题，所以宁可
+	// 回落哈希也不采信越界值。
+	var uid string
+	if r.cfg.PickForModel != nil {
+		if picked := r.cfg.PickForModel(model, pool2); picked != "" {
+			for _, u := range pool2 {
+				if u == picked {
+					uid = picked
+					break
+				}
+			}
+		}
+	}
+	if uid == "" {
+		uid = pool2[hashIndex(key, len(pool2))]
+	}
 
 	prev, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}
@@ -305,11 +341,11 @@ func hashIndex(key string, n int) int {
 //  5. prompt_cache_key（第 5 项，见下）
 //
 // 前四项均为 conversation 维度（对话级）。metadata.user_id 不再作为粘性键
-//（P1-anti-monopoly 剔除，issue118-deep-review §3）：user 维度粒度过粗——一个
+// （P1-anti-monopoly 剔除，issue118-deep-review §3）：user 维度粒度过粗——一个
 // user 的全部并行对话会钉同一账号（粘性范围远大于上游 prompt cache 的对话级边界），
 // 且曾抢占顶层 conversation_id 的优先级。剔除后发 user_id 的客户端回落加权轮换
-//（与无标识客户端同路径），旧 user_id 绑定靠 TTL（30m 滚动）与 Redis 镜像 TTL
-//（7d 兜底）自然过期，键消失不产生脏绑定。
+// （与无标识客户端同路径），旧 user_id 绑定靠 TTL（30m 滚动）与 Redis 镜像 TTL
+// （7d 兜底）自然过期，键消失不产生脏绑定。
 //
 // issue #35：客户端实际发 camelCase 的 conversationId，此前只识别 snake_case，
 // 导致粘性路由不命中、同对话轮转不同账号、上游上下文缓存 miss。现两种命名均识别，

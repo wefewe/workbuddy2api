@@ -17,5 +17,9 @@
   "0016-global-deepseek-max-effort.patch": "6a3e395423a1cc136b1f1d8385b497ded9776b1bc41e5a1ffca36c84d5b88fd1",
   "0017-dsh-system-prompt-fingerprint.patch": "4d44cbefaf382dc02609730a7998a6c87c7553588df89ccc135e871edfbdba2e",
   "0018-console-fallback-model-missing.patch": "ef36e101c60fa7d103be4f4c555aecff55e5ae1caba61e06f8871d379a45c384",
-  "0019-dsh-web-gui-fingerprint.patch": "ab82ba353b7719e7aeba71daf50f2bcd19c51ee163c975befd49712c01554010"
+  "0019-dsh-web-gui-fingerprint.patch": "ab82ba353b7719e7aeba71daf50f2bcd19c51ee163c975befd49712c01554010",
+  "0020-upstream-build-goproxy.patch": "80af2188cc934751e33e5ee4ed3f18453579814ad5b072a6deeb4a012dd8815e",
+  "0021-sticky-first-bind-weighted.patch": "7a6c208753561394cc555dd99e19c5415da2fefc544243bb9afb1a95acaf1c8c",
+  "0022-sticky-gofmt.patch": "edd1f80afbd05715fb9bf396b90a683d5e47c6d04c224f9955ceb21eeff7a9ae",
+  "0023-global-buddy-gate.patch": "c111d9b962ea3247d481a87e274836d59df4d4a82d1e27b573649afdd520951b"
 }
