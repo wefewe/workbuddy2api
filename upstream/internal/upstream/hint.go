@@ -57,6 +57,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
 		return "account session expired at upstream; the account is disabled until re-login"
+	case ErrAuthRejected:
+		return "account credential rejected by upstream (401); the gateway disables this account after repeated hits"
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrModelBlocked:

@@ -47,6 +47,16 @@ const (
 	// 不能落 ErrModelBlocked —— handler 会写 6 小时 (账号,模型) 负缓存，十几个号轮
 	// 一圈就是整池 503；也不该按 ErrClient 喂连败计数（失败的是路径不是账号）。
 	ErrFallbackModelMissing
+	// ErrAuthRejected 401 但**不带 12153**：上游网关的拦截页 / 空体 / 纯 HTML 401
+	// （APISIX 常见形态，body 里没有任何业务信封）。
+	//
+	// 为什么不能落 ErrClient：那条路只换号 + 连败降权（10 分钟后自动回池），坏号
+	// 会一直留在池里被反复选中，表现为「面板显示健康、每次命中都 503」。
+	// 为什么不能直接判 ErrSessionDead：chat 路径上的 ErrSessionDead 一次即
+	// Disable（applyErrorPolicy），而纯 401 可能是网关抖动或 token 轮换竞态，
+	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
+	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
+	ErrAuthRejected
 )
 
 func (k ErrKind) String() string {
@@ -81,6 +91,8 @@ func (k ErrKind) String() string {
 		return "tool_call_mismatch"
 	case ErrFallbackModelMissing:
 		return "fallback_model_missing"
+	case ErrAuthRejected:
+		return "auth_rejected"
 	case ErrClient:
 		return "client"
 	default:
@@ -608,6 +620,13 @@ func Classify(status int, body string) ErrKind {
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if sessionDeadRule.hit(body, lower) {
 		return ErrSessionDead
+	}
+	// 401 兜底（**无 12153** 的纯 401）：上游网关拦截页、空体、纯 HTML 都落到
+	// 这里。单列 ErrAuthRejected 而不是 ErrClient —— 见该 errkind 的注释：
+	// ErrClient 只换号不罚号，坏号会在池里反复被选中；而这一类的正确处置是
+	// 「连续 N 次后禁用」（handler.applyErrorPolicy 走 NoteAuthFailure）。
+	if status == http.StatusUnauthorized {
+		return ErrAuthRejected
 	}
 	// 渠道校验（/v2 上的新强校验，2026-10-17）：归**账号级**分类，但 applyErrorPolicy
 	// 里最先判它、只做软冷却（绝不禁用，理由见那里的注释）。不在这里归类的话：没带

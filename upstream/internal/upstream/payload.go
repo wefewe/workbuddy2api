@@ -7,6 +7,7 @@ package upstream
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"strings"
 )
 
@@ -61,6 +62,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	}
 	normalizeToolChoice(obj)
 	normalizeToolPatterns(obj)
+	// Kimi 系模型对「只有 enum、没有 type」的工具属性做严格校验（上游 11133）：
+	// 在出站前补 type，属于「让请求通过」的安全网，与 normalizeToolPatterns 同口径。
+	normalizeToolEnumTypes(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
@@ -408,4 +412,116 @@ func unescapePatternLiteralEscapes(node any) {
 			unescapePatternLiteralEscapes(v)
 		}
 	}
+}
+
+// normalizeToolEnumTypes 给「只有 enum、没有 type」的工具属性补上推断出的 type。
+//
+// 背景（现场实测 2026-10-24）：Kimi 系模型（k3.1-pro / k3-1 / k2.5）对
+// tools[].function.parameters 做严格 schema 校验 —— 属性只写 {"enum":[...]} 而不写
+// "type" 时整单 400：
+//
+//	{"code":11133,"msg":"Invalid request parameters",
+//	 "extError":{"code":"400001","message":"the request parameters were rejected by the model provider"}}
+//
+// 同一份 schema 在 DeepSeek / GLM / MiniMax 上照常 200，所以这是「按模型严格程度
+// 而异」的请求侧问题：不补 type，Kimi 用户等于该模型全废（每条请求都撞同一个 400）。
+//
+// 推断规则（只增补、不改 enum 取值，语义不变）：
+//   - 全部字符串 → string
+//   - 全部整数 → integer；整数与小数混合 → number
+//   - 全部布尔 → boolean
+//   - 混合标量/含 null → 不改写（无法无损推断），交由上游原样报错
+//
+// 作用域仅 tools/functions 的 parameters（与 normalizeToolPatterns 同口径），
+// 不动 response_format 等其它位置的 schema。
+func normalizeToolEnumTypes(obj map[string]any) {
+	for _, key := range []string{"tools", "functions"} {
+		list, ok := obj[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range list {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			// 现行形态把 parameters 包在 function 里；旧式形态直接挂在条目上。
+			if fn, ok := m["function"].(map[string]any); ok {
+				inferEnumTypes(fn["parameters"])
+			}
+			inferEnumTypes(m["parameters"])
+		}
+	}
+}
+
+// inferEnumTypes 递归处理 schema 树：补 type 并按常见关键字下钻。
+func inferEnumTypes(node any) {
+	switch n := node.(type) {
+	case map[string]any:
+		if enum, ok := n["enum"].([]any); ok {
+			if _, hasType := n["type"]; !hasType {
+				if t := enumScalarType(enum); t != "" {
+					n["type"] = t
+				}
+			}
+		}
+		for k, v := range n {
+			switch k {
+			case "properties", "patternProperties", "definitions", "$defs":
+				if props, ok := v.(map[string]any); ok {
+					for _, pv := range props {
+						inferEnumTypes(pv)
+					}
+				}
+			case "items", "additionalProperties", "not", "contains":
+				inferEnumTypes(v)
+			case "anyOf", "oneOf", "allOf", "prefixItems":
+				if list, ok := v.([]any); ok {
+					for _, x := range list {
+						inferEnumTypes(x)
+					}
+				}
+			}
+		}
+	case []any:
+		for _, v := range n {
+			inferEnumTypes(v)
+		}
+	}
+}
+
+// enumScalarType 由 enum 取值推断 JSON Schema type；无法无损推断时返回空串。
+func enumScalarType(vals []any) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	typ := ""
+	for _, v := range vals {
+		var cur string
+		switch x := v.(type) {
+		case string:
+			cur = "string"
+		case bool:
+			cur = "boolean"
+		case float64:
+			if math.Trunc(x) == x {
+				cur = "integer"
+			} else {
+				cur = "number"
+			}
+		default:
+			return ""
+		}
+		switch {
+		case typ == "":
+			typ = cur
+		case typ == cur:
+			// 同型，继续
+		case (typ == "integer" && cur == "number") || (typ == "number" && cur == "integer"):
+			typ = "number"
+		default:
+			return ""
+		}
+	}
+	return typ
 }

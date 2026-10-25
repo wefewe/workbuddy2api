@@ -18,6 +18,14 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
+// TestMain 统一关掉签到账号间隔与退避等待：默认值面向生产（3s / 5s+15s+60s），
+// 直接带进测试会让 500 响应类用例白等几十秒。需要验证节奏/重试的用例自行临时改回。
+func TestMain(m *testing.M) {
+	checkinAccountDelay = 0
+	checkinRetryDelays = nil
+	os.Exit(m.Run())
+}
+
 func TestNextFire(t *testing.T) {
 	loc := time.Local
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, loc)
@@ -487,6 +495,125 @@ func TestCheckinAllFail(t *testing.T) {
 	}
 }
 
+// TestCheckinRetryTransient10001 issue #256：上游 500 + code 10001"签到失败，
+// 请稍后重试"属于短时限流，退避重试后成功，不应直接记 fail 等下一轮定时。
+func TestCheckinRetryTransient10001(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			if calls.Add(1) < 3 {
+				w.WriteHeader(500)
+				w.Write([]byte(`{"code":10001,"msg":"签到失败，请稍后重试","requestId":"x"}`))
+				return
+			}
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":500,"CycleCapacityUsed":0}]}}}}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	oldRetry := checkinRetryDelays
+	checkinRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { checkinRetryDelays = oldRetry })
+
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("daily-checkin calls=%d want 3（前两次 10001 退避重试）", got)
+	}
+	if out[0].Status != CheckinOK {
+		t.Errorf("status=%q want ok（重试后成功）", out[0].Status)
+	}
+}
+
+// TestCheckinNoRetryOnAlready "今天已签到"是幂等成功，不能被当成可重试的 10001。
+func TestCheckinNoRetryOnAlready(t *testing.T) {
+	stub := &checkinStub{
+		checkinBody:    `{"code":10001,"msg":"今天已签到"}`,
+		resourceRemain: 300,
+	}
+	s, _ := newCheckinS(t, stub)
+
+	oldRetry := checkinRetryDelays
+	checkinRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { checkinRetryDelays = oldRetry })
+
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if out[0].Status != CheckinAlready {
+		t.Errorf("status=%q want already", out[0].Status)
+	}
+}
+
+// TestCheckinNoRetryOnHardFailure 非瞬时错误（业务码 10000 等）不重试，直接记 fail。
+func TestCheckinNoRetryOnHardFailure(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			calls.Add(1)
+			w.WriteHeader(400)
+			w.Write([]byte(`{"code":10000,"msg":"参数错误"}`))
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":100,"CycleCapacityUsed":0}]}}}}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	oldRetry := checkinRetryDelays
+	checkinRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { checkinRetryDelays = oldRetry })
+
+	out, _ := s.CheckinAll()
+	if got := calls.Load(); got != 1 {
+		t.Errorf("daily-checkin calls=%d want 1（10000 不重试）", got)
+	}
+	if out[0].Status != CheckinFail {
+		t.Errorf("status=%q want fail", out[0].Status)
+	}
+}
+
+// TestCheckinRetryableClassification 只有 HTTP 5xx 与业务码 10001 才值得重试。
+func TestCheckinRetryableClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"http500", &upstream.Error{Kind: upstream.ErrServer, Status: 500, Msg: `{"code":10001,"msg":"签到失败，请稍后重试"}`}, true},
+		{"http502-empty", &upstream.Error{Kind: upstream.ErrServer, Status: 502, Msg: ``}, true},
+		{"code10001", &upstream.Error{Kind: upstream.ErrClient, Status: 400, Msg: `{"code":10001,"msg":"签到失败，请稍后重试"}`}, true},
+		{"code10000", &upstream.Error{Kind: upstream.ErrClient, Status: 400, Msg: `{"code":10000,"msg":"参数错误"}`}, false},
+		{"code12153", &upstream.Error{Kind: upstream.ErrSessionDead, Status: 401, Msg: `{"code":12153,"msg":"Offline user session not found"}`}, false},
+		{"plain", errors.New("dial tcp: timeout"), false},
+	}
+	for _, c := range cases {
+		if got := checkinRetryable(c.err); got != c.want {
+			t.Errorf("%s: retryable=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestCheckinAllSkipsDisabled 禁用账号记 skipped，不参与签到。
 func TestCheckinAllSkipsDisabled(t *testing.T) {
 	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
@@ -643,28 +770,28 @@ func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
 // 老 CN 文件（空 domain，无 realm 键）→ cn；再次 refresh 不改变已补的标识（幂等）。
 func TestRunKeepaliveBackfillsRealm(t *testing.T) {
 	cases := []struct {
-		name       string
-		fixture    string
-		filename   string
-		wantRealm  string
+		name      string
+		fixture   string
+		filename  string
+		wantRealm string
 	}{
 		{
-			name: "老 global 落盘补 global",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`,
-			filename:   "workbuddy-g1.json",
-			wantRealm:  "global",
+			name:      "老 global 落盘补 global",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`,
+			filename:  "workbuddy-g1.json",
+			wantRealm: "global",
 		},
 		{
-			name: "老 CN 空 domain 落盘补 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"c1"}}`,
-			filename:   "workbuddy-c1.json",
-			wantRealm:  "cn",
+			name:      "老 CN 空 domain 落盘补 cn",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"c1"}}`,
+			filename:  "workbuddy-c1.json",
+			wantRealm: "cn",
 		},
 		{
-			name: "已有 realm 不被覆盖——global domain 显式 cn 保持 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai","realm":"cn"},"account":{"uid":"c2"}}`,
-			filename:   "workbuddy-c2.json",
-			wantRealm:  "cn",
+			name:      "已有 realm 不被覆盖——global domain 显式 cn 保持 cn",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai","realm":"cn"},"account":{"uid":"c2"}}`,
+			filename:  "workbuddy-c2.json",
+			wantRealm: "cn",
 		},
 	}
 	for _, c := range cases {

@@ -21,5 +21,11 @@
   "0020-upstream-build-goproxy.patch": "80af2188cc934751e33e5ee4ed3f18453579814ad5b072a6deeb4a012dd8815e",
   "0021-sticky-first-bind-weighted.patch": "7a6c208753561394cc555dd99e19c5415da2fefc544243bb9afb1a95acaf1c8c",
   "0022-sticky-gofmt.patch": "edd1f80afbd05715fb9bf396b90a683d5e47c6d04c224f9955ceb21eeff7a9ae",
-  "0023-global-buddy-gate.patch": "c111d9b962ea3247d481a87e274836d59df4d4a82d1e27b573649afdd520951b"
+  "0023-global-buddy-gate.patch": "c111d9b962ea3247d481a87e274836d59df4d4a82d1e27b573649afdd520951b",
+  "0024-auth-rejected-auto-disable.patch": "aaf599365aeb04d809149321506f026b70d8156b24f78eda1719de2bfb55198f",
+  "0025-tool-schema-enum-type-11133.patch": "c0fd3dc047acfc9e2dd5690c50945662d93b9ca3e8f50291507bcc6b2882f4f3",
+  "0026-auth-tool-gofmt.patch": "231117b7cc329c27989667677e0a6de8ad3d016d9b71e60e198e2636243f3b6d",
+  "0027-alpine-mirror.patch": "bf626b8897a32022e3ecd903e1f585a7d9c6bdfa3075bb5e8a5377868ba43b25",
+  "0028-empty-stream-retryable.patch": "e7dbcf2e9526e170cd7664145ac42b19508f4d78221288f5685b18de871df273",
+  "0029-checkin-throttle-retry.patch": "96cacaea17445379129e0a773c3be5e6ab63289a5bef13ff14ab5c195d21b306"
 }

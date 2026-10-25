@@ -866,6 +866,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
+			// 模型要求工具 schema 里 enum 必须带 type，缺了整单 400）。同一 body 换任何
+			// 账号都会得到同一个 400 —— 轮转只会把无效请求放大 MaxRotate 倍，而
+			// ErrClient 默认策略里的 NoteFailures 还会把健康账号的连败计数喂高、临时
+			// 踢出池（现场实测：一次连续探测把 healthy 从 19 打到 7）。
+			// 因此这里 fail-fast：400 + 上游原文，不轮转、不罚号（本分支不进
+			// applyErrorPolicy，ErrClient 的 NoteFailures 不会执行）。
+			if kind == upstream.ErrClient && strings.Contains(string(respBody), "11133") {
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request parameters were rejected by the model provider"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "invalid_request", msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1150,6 +1168,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrAuthRejected:
+		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
+		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），
+		// 改走连续计数，达到 sessionDeadThreshold 才禁用。计数器与 12153 共用：
+		// 同一账号先后撞到两种形态，本来就说明凭证不会自己好转。
+		h.cfg.Pool.NoteAuthFailure(uid, "401 auth rejected")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

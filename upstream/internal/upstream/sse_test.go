@@ -944,7 +944,7 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 						continue
 					}
 					if json.Unmarshal([]byte(payload), &e) == nil {
-						if em, ok := e["error"].(map[string]any); ok && em["message"] == "empty upstream stream" && em["type"] == "upstream_error" && em["code"] == "upstream_parse" {
+						if em, ok := e["error"].(map[string]any); ok && em["message"] == "upstream stream ended before completion (empty upstream stream)" && em["type"] == "upstream_error" && em["code"] == "upstream_parse" {
 							found = true
 						}
 					}
