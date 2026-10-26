@@ -27,5 +27,6 @@
   "0026-auth-tool-gofmt.patch": "231117b7cc329c27989667677e0a6de8ad3d016d9b71e60e198e2636243f3b6d",
   "0027-alpine-mirror.patch": "bf626b8897a32022e3ecd903e1f585a7d9c6bdfa3075bb5e8a5377868ba43b25",
   "0028-empty-stream-retryable.patch": "e7dbcf2e9526e170cd7664145ac42b19508f4d78221288f5685b18de871df273",
-  "0029-checkin-throttle-retry.patch": "96cacaea17445379129e0a773c3be5e6ab63289a5bef13ff14ab5c195d21b306"
+  "0029-checkin-throttle-retry.patch": "96cacaea17445379129e0a773c3be5e6ab63289a5bef13ff14ab5c195d21b306",
+  "0030-gzip-body-and-channel-retry.patch": "9809355a707249a7d31ef93676eae9543e940b7fc38b411f16bc7bf38790665a"
 }

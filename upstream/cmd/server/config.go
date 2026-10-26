@@ -112,6 +112,10 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// GzipBody chat 请求体超过阈值时用 gzip 压缩后再发上游（issue #297）。
+		// 缺省 true：服务器出口带宽窄时（实测 1Mbps）3MB 上下文可省 20s+ 首字节；
+		// 小于阈值（64KB）的请求不压缩，短对话零开销。排障可显式配 false。
+		GzipBody bool `json:"gzip_body"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -207,6 +211,8 @@ func Default() *Config {
 	// （upstream.Client 的 attributionClientName 空值也回落 WorkBuddy，双保险）；
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
+	// 大请求体压缩默认开：省的是本机出口带宽（issue #297 实测 1Mbps 出口下 3MB 差 20s+）。
+	c.Upstream.GzipBody = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	reasoningFallback := true
 	c.ReasoningAsContent = &reasoningFallback
@@ -321,6 +327,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
+		}
+	}
+	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.GzipBody = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
