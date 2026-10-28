@@ -56,7 +56,9 @@
     "passthrough_ip": false
   },
   "features": {
-    "sanitize_blacklist_fingerprints": true
+    "sanitize_blacklist_fingerprints": true,
+    "sanitize_extra_features": [],
+    "sanitize_extra_rewrites": []
   },
   "prompt": {
     "mode": "passthrough",

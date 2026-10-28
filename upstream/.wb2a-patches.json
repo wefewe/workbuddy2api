@@ -28,5 +28,15 @@
   "0027-alpine-mirror.patch": "bf626b8897a32022e3ecd903e1f585a7d9c6bdfa3075bb5e8a5377868ba43b25",
   "0028-empty-stream-retryable.patch": "e7dbcf2e9526e170cd7664145ac42b19508f4d78221288f5685b18de871df273",
   "0029-checkin-throttle-retry.patch": "96cacaea17445379129e0a773c3be5e6ab63289a5bef13ff14ab5c195d21b306",
-  "0030-gzip-body-and-channel-retry.patch": "9809355a707249a7d31ef93676eae9543e940b7fc38b411f16bc7bf38790665a"
+  "0030-gzip-body-and-channel-retry.patch": "9809355a707249a7d31ef93676eae9543e940b7fc38b411f16bc7bf38790665a",
+  "0031-console-first-path-model-missing.patch": "5bdf0899e7fa803a18cf607795c0a5c44fe1dd011f36bae18b5c7dc6825a1915",
+  "0032-console-first-global-only.patch": "082866d5d6724e451fa7099098c46fcab8344f92265b56f51e20096fb6f23dd0",
+  "0033-model-block-ttl-shortening.patch": "00660fa542c6504e589a03c584cde2ce70717e4d79d0e5682a401a8e6aa5238e",
+  "0034-model-block-selfheal.patch": "17132efa2adf98f62a2ed825e06176c530088467b1e4c86625b9808c34a060d4",
+  "0035-channel-check-move-system-retry.patch": "177d50bdb3a9c6f53755388c31758bfeb084a9f581fe157327286572fd664cfa",
+  "0036-dsh-workspace-root-and-sanitize-config.patch": "ff6feb15b29e5693cc4bc7fbb735d55ec768cd1a5bfb55714657d4362d8cd32c",
+  "0037-channel-path-tests-realm-aware.patch": "31a2d81f6a87124e56dd2907658652a996bc0add1e35caa78a09bbe6767cc42e",
+  "0038-gzip-channel-check-uncompressed-retry.patch": "e8bbad5c78b93817e4eeebd52cee23018fe87877a7581c34df2a6278f30fd11c",
+  "0039-channel-check-request-scope.patch": "6f1f1bf73f5f596301def7e210715cda897f94080e51b908c950b6a9c77c42f4",
+  "0040-model-block-selfheal-realm-aware.patch": "312d0c45a9f68a7a65ceb8da99d5bfab31ed409e40e291254088c97ac97f3e24"
 }

@@ -122,6 +122,26 @@ func (h *Handler) adminAccountRevive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// adminModelAvailable 接受管理端的成功探测，只解除该账号该模型的 11102 负缓存。
+// 小请求成功不能证明真实 6004 token 配额已恢复，因此不清除 6004 或账号级状态。
+func (h *Handler) adminModelAvailable(w http.ResponseWriter, r *http.Request) {
+	uid, ok := adminUID(w, r)
+	if !ok {
+		return
+	}
+	if _, _, found := h.cfg.Pool.ManualDisabledState(uid); !found {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found")
+		return
+	}
+	model := strings.TrimSpace(r.PathValue("model"))
+	if model == "" || len(model) > 120 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
+		return
+	}
+	h.cfg.Pool.BlockModelClear(uid, model)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": model})
+}
+
 // accountAutoDisabled 读某账号当前的自动禁用位（供响应回显）。
 // 复用 Pool.List 的单账号查询：轮询全部账号在小池下开销可忽略，
 // 且避免为此在 pool 上再开一个只读访问器（保持接口面最小）。

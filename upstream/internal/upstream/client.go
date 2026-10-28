@@ -1255,6 +1255,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// （issue #296：上游报文明确写着「请求被拦截，请重新发送」，说明它期望
 	// 客户端重试；灰度校验有概率性，同一请求重发一次常能通过）。
 	channelRetried := false
+	// primaryChannel* 记录 /v2 的渠道拒绝原文：/console 兜底只报 11102 时返回它，
+	// 让调用方看到真实原因（11128），而不是备用路径缺模型。
+	var primaryChannelRaw []byte
+	var primaryChannelErr *Error
 	for i := 0; i < len(paths); i++ {
 		path := paths[i]
 		url := c.chatBase(a) + path
@@ -1313,10 +1317,23 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// 不是「该账号缺这个模型」。照 ErrModelBlocked 处理，handler 会写 (账号,模型)
 			// 6 小时负缓存，逐个账号轮过去就是整池 503 no_healthy_account，比不换路径更糟。
 			// 也不按 ErrClient 处理：连败计数是账号健康信号，这里失败的是路径不是账号。
-			if i > 0 && kind == ErrModelBlocked {
+			if kind == ErrModelBlocked && (i > 0 || path == chatConsolePath) {
 				log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，按请求级处理（不写模型冷却）",
 					logfmt.Label(a.UID, a.Nickname), path, kind)
+				// 判据按路径而非候选序号（2026-10-28）：撞过渠道校验后 chatPaths 会把 /console
+				// 排到首位，那时 11102 落在 i == 0，旧条件不成立，就被当成「该账号缺这个模型」写
+				// 6 小时负缓存；逐个账号轮过去就是整池 503 no_healthy_account。
+				// /console 报 11102 只说明这条路径没有该模型（或两端模型命名空间不同），
+				// 所以还要换回 /v2 继续试，别把请求直接判死。
+				if path == chatConsolePath && i < len(paths)-1 {
+					log.Printf("WARN: [upstream] chat_stream acct=%s: %s 无此模型，换路径 %s 重试",
+						logfmt.Label(a.UID, a.Nickname), path, paths[i+1])
+					continue
+				}
 				kind = ErrFallbackModelMissing
+				if primaryChannelErr != nil {
+					return nil, primaryChannelErr.Status, primaryChannelRaw, primaryChannelErr
+				}
 			}
 			// 路径级拒绝 → 换下一个候选路径再试，**不**把它当账号问题。
 			//   · 渠道校验（11128/11-128）：/v2 新增强校验，/console 放行（见 chatPaths）；
@@ -1327,6 +1344,25 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// 失败仍按下面原有逻辑返回，由 handler 决定怎么罚号 —— 那时也**不该禁用**
 			// （见 handler 的 ErrAccountFault 分支）。
 			if IsChannelCheck(string(raw)) {
+				if path == chatCompletionsPath {
+					primaryChannelRaw = raw
+					primaryChannelErr = &Error{Kind: kind, Status: resp.StatusCode, Msg: string(raw)}
+				}
+				// 压缩请求体本身就是一条「不像官方客户端」的信号（issue #303：
+				// DSH 长上下文被 gzip 后稳定吃 11128，同一 body 不压缩即 200）。
+				// 命中渠道校验时**先**去掉压缩重发同一条路径：gzip 只是省带宽的
+				// 优化，不值得为它换来一整轮失败。这一步放在 markChannelBlocked
+				// 之前 —— 去掉压缩后成功就说明账号没问题，不该给它留下「渠道受限」
+				// 记忆（否则后续 10 分钟白走 /console）。
+				if contentEncoding != "" && !gzipRetried {
+					gzipRetried = true
+					contentEncoding = ""
+					outBody = prepared
+					log.Printf("WARN: [upstream] chat_stream acct=%s: 渠道校验命中且请求体是压缩的，改用未压缩重试",
+						logfmt.Label(a.UID, a.Nickname))
+					i--
+					continue
+				}
 				// 记下这个账号被渠道校验拦过：后续请求优先走 /console（issue #296），
 				// 不必每次都先撞一次 /v2。TTL 到期自动回落，上游策略变化后不会卡在
 				// 次优路径上。
@@ -1480,7 +1516,12 @@ func (c *Client) chatPaths(a *auth.Auth) []string {
 	// 被渠道校验拦过的账号：优先走官方客户端路径 /console（issue #296）。
 	// /v2 仍是主路径（#119 的 /console WAF 取舍不变），这里只调整**顺序**：
 	// 上一次撞过 11128 的账号，下一轮不必再白跑一次 /v2。
-	if a != nil && c.channelBlockedFor(a.UID) {
+	//
+	// 仅对 global 生效：CN 的 /console 不提供 deepseek-v4.1-flash 等模型，提前换过去
+	// 会让该账号之后 10 分钟的**所有**请求都吃 11102（model service info not found）。
+	// 一个账号被 11128 拦一次就把整池打成 503，比原问题更严重；CN 保持 /v2 优先，
+	// 11128 由调用方按请求级处理。
+	if a != nil && a.Realm() != "cn" && c.channelBlockedFor(a.UID) {
 		return []string{chatConsolePath, chatCompletionsPath}
 	}
 	return []string{chatCompletionsPath, chatConsolePath}

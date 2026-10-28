@@ -121,6 +121,14 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// SanitizeExtraFeatures 运行期追加的特征预检串：任一命中即进入净化。
+		// 上游黑名单是逐词扩充的（GUI 句 → workspace root → 后续还会加），
+		// 放配置里就不必为每个新词重编译镜像；空 = 只用内置静态表。
+		SanitizeExtraFeatures []string `json:"sanitize_extra_features"`
+		// SanitizeExtraRewrites 运行期追加的逐字替换对，格式 [["原串","替换串"], …]。
+		// 只做精确替换（大小写敏感），与 sanitize_extra_features 配套使用：
+		// 通常把新增词先加进 features 保证进入净化分支，再加进 rewrites 做实际改写。
+		SanitizeExtraRewrites [][2]string `json:"sanitize_extra_rewrites"`
 	} `json:"features"`
 
 	Prompt struct {

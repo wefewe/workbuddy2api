@@ -475,12 +475,17 @@ const (
 const defaultSoftRateMax = 2 * time.Hour
 
 // 11102「该后端无此模型」负缓存的退避参数（吸收 model_blocks.py 语义，复用 modelCooldowns
-// 机制承载）。首次命中冷却 6h，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
-// 封顶 24h（最多一天再试一次）；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+// 机制承载）。首次命中冷却 2m，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
+// 封顶 10m；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+//
+// 2026-10-28 从 6h/24h 缩短到 2m/10m：原参数把「一次偶发 11102」放大成整池锁死——
+// 见 ithtelab/workbuddy-manager#308 作者的复现（同样波次只让单账号停 2 分钟即自愈，
+// 而 6h 基数会把 14 个账号逐个锁死一整天）。缩短的代价只是「真无此模型」时多试几次，
+// 收益是全池自愈速度从小时级回到分钟级。
 const (
-	modelBlockBaseTTL = 6 * time.Hour
-	modelBlockMaxTTL  = 24 * time.Hour
-	modelBlockShift   = 6 // 2^6=64 倍后封顶：6h×64>24h，实际封顶锚定 24h
+	modelBlockBaseTTL = 2 * time.Minute
+	modelBlockMaxTTL  = 10 * time.Minute
+	modelBlockShift   = 6 // 2^6=64 倍后封顶：2m×64>10m，实际封顶锚定 10m
 )
 
 // sessionDeadThreshold 连续 ErrSessionDead（12153）达到该次数才永久禁用。

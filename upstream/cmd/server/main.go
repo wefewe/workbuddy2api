@@ -146,6 +146,13 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 运行期追加的黑名单词表（features.sanitize_extra_features / _rewrites）：
+	// 上游逐词扩充黑名单时改 config.json 重启即可，不必重编译镜像。
+	// 空表 = 只用内置静态表（行为与旧版一致）。
+	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
+	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
+		log.Printf("净化额外特征词表已加载：%d 条（config.json features.sanitize_extra_features）", n)
+	}
 	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
 	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
 	up.UserAgent = cfg.Upstream.UserAgent

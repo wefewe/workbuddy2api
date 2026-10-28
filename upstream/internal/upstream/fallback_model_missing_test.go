@@ -43,8 +43,8 @@ func TestConsoleFallbackModelMissingIsRequestLevel(t *testing.T) {
 	if !ok {
 		t.Fatalf("应返回分类信封，got %T (%v)", err, err)
 	}
-	if ue.Kind != ErrFallbackModelMissing {
-		t.Fatalf("回退路径的 11102 应归请求级（ErrFallbackModelMissing），got %v", ue.Kind)
+	if ue.Kind != ErrAccountFault || string(raw) != channelBody {
+		t.Fatalf("应保留主路径的渠道拒绝，不让备用路径缺模型覆盖原始原因，got %v raw=%s", ue.Kind, raw)
 	}
 	if len(paths) != 2 || !strings.Contains(paths[0], "/v2/") || !strings.Contains(paths[1], "/console/") {
 		t.Fatalf("应当先在 /v2 被拒再换 /console，实际路径=%v", paths)

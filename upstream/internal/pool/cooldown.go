@@ -181,6 +181,41 @@ func (p *Pool) BlockModelClear(uid, model string) {
 	p.dirty.Store(true)
 }
 
+// ClearModelBlocks 清掉**所有账号**上该模型的 11102 负缓存，返回清理条数。
+//
+// 背景：上游 11102 有时是瞬时故障（模型注册表抖动 / 灰度切换）。一次抖动会让每个
+// 被选中的账号各写一条 6h 起的指数退避负缓存，全池写满后对外就是「一整天 503
+// no_healthy_account」，而模型其实早已恢复（实测 20/20 账号直连均 200）。
+//
+// 选号侧发现「该模型 0 个可用账号」时调用本方法自愈：清一次、重试一次。
+// 只清 reason 以 "11102" 开头的条目，不碰 6004 的独立冷却表。
+func (p *Pool) ClearModelBlocks(model string) int {
+	if model == "" {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.byUID {
+		if len(e.modelCooldowns) == 0 {
+			continue
+		}
+		mc, ok := e.modelCooldowns[model]
+		if !ok || !strings.HasPrefix(mc.Reason, "11102") {
+			continue
+		}
+		delete(e.modelCooldowns, model)
+		if len(e.modelCooldowns) == 0 {
+			e.modelCooldowns = nil
+		}
+		n++
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n
+}
+
 // CooldownSoftRate 429/限流文案的**账号级**软冷却入口（handler.applyErrorPolicy 调用）。
 //
 // 语义：

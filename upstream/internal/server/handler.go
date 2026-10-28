@@ -118,6 +118,7 @@ func NewHandler(cfg Config) *Handler {
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
+		h.mux.HandleFunc("POST /admin/accounts/{uid}/models/{model}/available", h.withAuth(h.adminModelAvailable))
 	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
@@ -618,6 +619,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// 11128 请求级抢救：把 system 文本搬进首条 user 只做一次（搬两次没有意义，
+	// 第二次仍被拦说明触发词在 user 侧或请求其它部分）。
+	systemMoved := false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
@@ -677,6 +681,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -693,6 +698,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			// 自愈：全池被同一个模型挡死时，几乎都是上游**瞬时** 11102（模型注册表
+			// 抖动 / 灰度切换），而不是所有账号真的缺这个模型。6h 起的指数退避会把
+			// 一次抖动放大成半天 503（实测：deepseek-v4.1-flash 20/20 账号被写负缓存，
+			// 直连全部 200）。这里对「该模型 0 个可用账号」清一次负缓存并重试；
+			// 只清一次，避免模型真下线时死循环（届时仍返回 503，并透传上游 11102 原文）。
+			//
+			// 判据必须与**选号同一个 realm 维度**（issue #332）：上面选号走
+			// PickExcludingForRealm(realm)，这里却按全池看可用性 —— 双 realm 部署下
+			// 只要另一个 realm 还有账号，全池判据就永远非空，自愈永不触发；而本次请求
+			// 的 realm 池已被负缓存全挡，于是固定 503（换任何模型都一样，逐个被打成
+			// 负缓存）。realm 为空时该变体退化为全池语义，单 realm 部署行为不变。
+			if !modelBlocksCleared && bareModel != "" && len(h.cfg.Pool.AvailableUIDsForModelRealm(bareModel, realm)) == 0 {
+				if n := h.cfg.Pool.ClearModelBlocks(bareModel); n > 0 {
+					modelBlocksCleared = true
+					tried = map[string]bool{}
+					log.Printf("WARN: [server] model=%s: all accounts blocked by 11102 negative cache, cleared %d and retrying (suspect transient upstream)", bareModel, n)
+					continue
+				}
+			}
 			st.status = http.StatusServiceUnavailable
 			break
 		}
@@ -780,6 +804,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			}
+			// 渠道校验是本次请求被拒，不能据此给整个账号写冷却。先做一次
+			// 请求级抢救（system 文本搬进首条 user），仍被拦就透传原始拒绝并
+			// 停止换号，避免同一报文连坐整个账号池。
+			if upstream.IsChannelCheck(string(respBody)) {
+				if kind == upstream.ErrAccountFault && !systemMoved &&
+					(h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") {
+					if moved, ok := prompt.MoveSystemToUser(body); ok {
+						body = moved
+						systemMoved = true
+						// 单账号池也能拿到重试机会（重试占一次轮换名额，与原账号解绑）。
+						delete(tried, acct.UID)
+						releaseHeld()
+						log.Printf("WARN: [server] channel-check (system content) -> moved system into user, retry")
+						continue
+					}
+				}
+				fail(acct.UID)
+				st.status = status
+				writeOpenAIErrorHint(w, status, "channel_check_rejected", string(respBody),
+					"upstream channel verification rejected this request; account availability is unchanged")
+				return
 			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
@@ -1202,8 +1248,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 上游层已先做过换路径兜底（/v2 → /console，见 upstream.chatPaths）；两条都被
 		// 拒才走到这里：软冷却让它退出轮换（别被反复选中），但**不清凭证、不标禁用**。
 		if upstream.IsChannelCheck(body) {
-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown,
-				"channel check ("+upstreamCodeLabel(body, uerr)+")")
+			// chatCompletions 已直接透传；防御调用同样不罚账号。
 			return
 		}
 		if strings.Contains(lowerBody, "request illegal") {

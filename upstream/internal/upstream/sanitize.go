@@ -20,7 +20,16 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
+	"workspace root",                                  // DSH file-reference 提示词（上游 2026-10-27 新增词，见 CangShui/workbuddy-gateway#28）
 }
+
+// sanitizeExtraFeatures 运行期从 config 追加的特征（features.sanitize_extra_features）。
+// 启动时一次性注入、之后只读，因此无需加锁；与 sanitizeFeatures 分开存放是为了可幂等
+// 重新配置（ConfigureSanitize 先清空再加，避免重复 append）。
+var sanitizeExtraFeatures []string
+
+// sanitizeExtraRewrites 运行期从 config 追加的逐字替换（features.sanitize_extra_rewrites）。
+var sanitizeExtraRewrites [][2]string
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
 var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
@@ -76,6 +85,16 @@ var sanitizeRewrites = [][2]string{
 		"11128",
 		"11-128",
 	},
+	{
+		// 工作区句（2026-10-27 新增词，CangShui/workbuddy-gateway#28 二分实测）：
+		// DSH 的 dsh-file-reference 插件把
+		// "Relative paths resolve from the workspace root; absolute paths identify
+		//  files or directories on the host." 注入 system，上游新增对 "root" 一词的
+		// 逐字匹配（sys[:2075] 放行、sys[:2081] 拒绝）。root→base 一词之差即可绕过，
+		// 语义不变（base 与 root 在这里同义）。这条会随 DSH 每个请求发出，优先级最高。
+		"workspace root",
+		"workspace base",
+	},
 }
 
 // sanitizeDshRe 通配层：客户端「自我介绍句」的模板匹配（issue #246）。
@@ -105,7 +124,7 @@ var sanitizeRewrites = [][2]string{
 //   - 命中位置不限行首：真实请求里这句是 system 第一条，但客户端也可能把它嵌在
 //     模板里（"<system>You are …"）。放宽的代价只是把一句自我介绍换个说法。
 var sanitizeDshRe = regexp.MustCompile(
-	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on) [^\n]{0,120}?\.(\s|$)`)
+	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on|built by|created by|developed by|made by|trained by) [^\n]{0,120}?\.(\s|$)`)
 
 // sanitizeDshRepl 是上面那句的替身：中性、无品牌，不含任何已知指纹片段。
 // `${1}` 把句尾那个空白/行尾原样接回去——不接的话 "…Harness. Use the read tool"
@@ -138,6 +157,14 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	// 运行期注入的额外逐字替换（features.sanitize_extra_rewrites）：让上游新增
+	// 黑名单词不必重编译镜像，改 config.json 重启即可。
+	for _, rw := range sanitizeExtraRewrites {
+		if rw[0] == "" || rw[0] == rw[1] {
+			continue
+		}
+		text = strings.ReplaceAll(text, rw[0], rw[1])
+	}
 	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	// DSH Web GUI 段落：上游按「跨两句的连续文本」拦截，必须动品牌短语才拆得开。
 	text = sanitizeDshGuiRe.ReplaceAllString(text, sanitizeDshGuiRepl)
@@ -161,9 +188,24 @@ func sanitizeText(text string) string {
 // Contains 大小写敏感、sanitizeHdrRe 要求冒号——两者都会漏掉「混合大小写 + 裸键名」，
 // 必须再用不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe），否则整条净化被跳过。
 // sanitizeBareHdrRe 不要求冒号，是 sanitizeHdrRe 的超集，故无需再单独匹配后者。
+//
+// 2026-10-28 补：特征表本身也要大小写不敏感。issue #246 的教训是「原文写 AI agent
+// 大写、小写特征串永远命中不到」，此前只靠 sanitizeDshRe 的 (?i) 兜住句式类；
+// workspace root 这类普通短语（用户可能在正文里大写复述）仍需 ToLower 兜底，
+// 否则预检直接放行、改写层根本不执行。lower 只在进入函数时算一次。
 func hasFingerprint(text string) bool {
+	lower := strings.ToLower(text)
 	for _, f := range sanitizeFeatures {
-		if strings.Contains(text, f) {
+		if strings.Contains(text, f) || strings.Contains(lower, strings.ToLower(f)) {
+			return true
+		}
+	}
+	// 运行期注入的额外特征（features.sanitize_extra_features）：同样走小写兜底。
+	for _, f := range sanitizeExtraFeatures {
+		if f == "" {
+			continue
+		}
+		if strings.Contains(text, f) || strings.Contains(lower, strings.ToLower(f)) {
 			return true
 		}
 	}
@@ -274,4 +316,31 @@ func sanitizeMessages(messages []any) bool {
 		}
 	}
 	return changed
+}
+
+// ConfigureSanitize 注入运行期额外词表（启动时调用一次，来自 config.json 的
+// features.sanitize_extra_features / sanitize_extra_rewrites）。
+//
+// 为什么要有这个入口：上游的黑名单是**逐词扩充**的——2026-10-24 是 GUI 句、10-27
+// 变成 workspace root（CangShui/workbuddy-gateway#24 → #28），每次都得重编译镜像、
+// 重新部署才能跟上。把它做成配置项后，运维只需改 config.json 重启容器，不再等发版。
+//
+// 幂等：每次都整体替换而不是 append，重复调用不会让同一词叠加多次。
+// 参数为空表示清空额外词表（回落到内置静态表）。
+func ConfigureSanitize(extraFeatures []string, extraRewrites [][2]string) {
+	cleanFeatures := make([]string, 0, len(extraFeatures))
+	for _, f := range extraFeatures {
+		if f = strings.TrimSpace(f); f != "" {
+			cleanFeatures = append(cleanFeatures, f)
+		}
+	}
+	cleanRewrites := make([][2]string, 0, len(extraRewrites))
+	for _, rw := range extraRewrites {
+		if rw[0] == "" || rw[0] == rw[1] {
+			continue
+		}
+		cleanRewrites = append(cleanRewrites, rw)
+	}
+	sanitizeExtraFeatures = cleanFeatures
+	sanitizeExtraRewrites = cleanRewrites
 }

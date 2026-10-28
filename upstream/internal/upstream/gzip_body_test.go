@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,17 +72,26 @@ func TestGzipUnsupported(t *testing.T) {
 	}
 }
 
-// TestChannelBlockedReordersPaths 被渠道校验拦过的账号优先走 /console（issue #296）。
+// TestChannelBlockedReordersPaths 渠道校验记忆只对 global 提前 /console（#296 / #308）。
+//
+// CN 的 /console 不提供 deepseek-v4.1-flash 等模型：一旦把 /console 排到首位，
+// 该账号之后 10 分钟的**每个**请求都会先吃一次必然失败的 11102，进而把整池写成
+// 模型冷却。所以 CN 保持 /v2 优先，11128 由调用方按请求级处理。
 func TestChannelBlockedReordersPaths(t *testing.T) {
 	c := &Client{}
-	a := &auth.Auth{UID: "u1"}
-	if got := c.chatPaths(a); got[0] != chatCompletionsPath {
+	cn := &auth.Auth{UID: "u1"}
+	if got := c.chatPaths(cn); got[0] != chatCompletionsPath {
 		t.Fatalf("默认应 /v2 优先，got %v", got)
 	}
 	c.markChannelBlocked("u1")
-	got := c.chatPaths(a)
-	if got[0] != chatConsolePath || got[1] != chatCompletionsPath {
-		t.Fatalf("命中渠道校验后应 /console 优先，got %v", got)
+	if got := c.chatPaths(cn); got[0] != chatCompletionsPath {
+		t.Fatalf("CN 账号即使命中渠道校验也应保持 /v2 优先，got %v", got)
+	}
+	// global 命中后提前 /console（#296 的行为保留）
+	gl := &auth.Auth{UID: "g1", Domain: "www.workbuddy.ai"}
+	c.markChannelBlocked("g1")
+	if got := c.chatPaths(gl); got[0] != chatConsolePath || got[1] != chatCompletionsPath {
+		t.Fatalf("global 命中渠道校验后应 /console 优先，got %v", got)
 	}
 	// 未命中的其他账号不受影响
 	if other := c.chatPaths(&auth.Auth{UID: "u2"}); other[0] != chatCompletionsPath {
@@ -132,5 +143,49 @@ func TestChannelCheckResendsOnceOnBothPaths(t *testing.T) {
 	// /v2 + /console + 重发 1 次 = 3 次
 	if calls != 3 {
 		t.Fatalf("calls=%d want 3（/v2、/console、重发一次）", calls)
+	}
+}
+
+// TestChannelCheckFallsBackToUncompressed 压缩请求体命中渠道校验时，先去压缩重试
+// 同一条路径（issue #303：DSH 长上下文 gzip 后稳定 11128，不压缩即 200）。
+func TestChannelCheckFallsBackToUncompressed(t *testing.T) {
+	channel := `{"code":11128,"msg":"request illegal","displayTips":{"en":"This channel verification failed"}}`
+	var gotEncoding []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enc := r.Header.Get("Content-Encoding")
+		gotEncoding = append(gotEncoding, enc)
+		if enc == "gzip" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(channel))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.GzipBody = true
+	c.ChatBaseCN = srv.URL
+	acct := &auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}
+	big := `{"model":"m","messages":[{"role":"user","content":"` +
+		strings.Repeat("上下文", 30000) + `"}]}`
+	body, status, raw, err := c.ChatStream(acct, []byte(big), "", ChatMeta{})
+	if err != nil {
+		t.Fatalf("status=%d err=%v body=%s", status, err, raw)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, raw)
+	}
+	if body != nil {
+		body.Close()
+	}
+	if len(gotEncoding) != 2 || gotEncoding[0] != "gzip" || gotEncoding[1] != "" {
+		t.Fatalf("应当先发压缩、再去压缩重试，实际 Content-Encoding 序列=%v", gotEncoding)
+	}
+	if c.channelBlockedFor("u1") {
+		t.Fatal("压缩重试成功的请求不该把账号标记成渠道受限")
 	}
 }

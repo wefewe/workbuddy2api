@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -79,8 +80,7 @@ func TestChatFallsBackToConsoleOnChannelCheck(t *testing.T) {
 }
 
 func TestChatChannelCheckNeverDisables(t *testing.T) {
-	// 两条路径都被渠道校验拒：软冷却（退出轮换、别被反复选中），但**不禁用** ——
-	// 禁用会写「需重新登录」，把用户指向错误的排查方向（凭证是好的）。
+	// 两条路径都被拒时透传本次请求错误，不冷却或禁用整个账号。
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return sseResponse(400, channelCheckBody()), nil
@@ -98,11 +98,8 @@ func TestChatChannelCheckNeverDisables(t *testing.T) {
 	if st.Disabled {
 		t.Fatalf("渠道校验**绝不能**禁用账号（用户报告的症状）：reason=%q", st.DisabledReason)
 	}
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("两条路径都被拒时应软冷却让它退出轮换：%+v", st)
-	}
-	if !strings.Contains(st.Reason, "channel check") {
-		t.Errorf("冷却原因应写明是渠道校验，便于排障：%q", st.Reason)
+	if st.Cooling || rec.Code != http.StatusBadRequest {
+		t.Fatalf("渠道拒绝应仅影响当前请求：status=%d account=%+v", rec.Code, st)
 	}
 }
 
@@ -141,4 +138,70 @@ func TestConsoleFallbackModelMissingDoesNotBlockModel(t *testing.T) {
 	if st.Cooling || st.Disabled {
 		t.Errorf("账号不该被冷却/禁用: cooling=%v disabled=%v", st.Cooling, st.Disabled)
 	}
+}
+
+// 11128 按 system 内容判定：合法系统提示词不该把账号拖下水。
+//
+// 同一请求体先被渠道校验拦下（/v2 与 /console 都拒），handler 把 system 文本
+// 搬进首条 user 后重试成功；账号不冷却、不禁用。
+func TestChatChannelCheckMovesSystemIntoUserAndRetries(t *testing.T) {
+	var bodies []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			if systemHasPersona(b) {
+				return sseResponse(400, channelCheckBody()), nil
+			}
+			return sseResponse(200, sseOK), nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough", SoftCooldown: 600 * time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[`+
+			`{"role":"system","content":"PERSONA-SAFE"},`+
+			`{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("system 文本搬进 user 后应成功，got code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(bodies) < 2 {
+		t.Fatalf("应至少重试一次，实际上游请求 %d 次", len(bodies))
+	}
+	last := bodies[len(bodies)-1]
+	if systemHasPersona([]byte(last)) {
+		t.Fatalf("重试请求仍是原始 system，未搬迁: %s", last)
+	}
+	if !strings.Contains(last, "PERSONA-SAFE") {
+		t.Fatalf("重试请求丢了 system 文本: %s", last)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.Disabled {
+		t.Fatalf("内容问题不该罚账号：cooling=%v disabled=%v", st.Cooling, st.Disabled)
+	}
+}
+
+// systemHasPersona 判断请求体里是否还有「原始 system 内容」（persona 标记仍在
+// system 通道）。出站前 client 会 normalize 重排消息字段，所以按 JSON 解析判断，
+// 不依赖字段顺序。
+func systemHasPersona(body []byte) bool {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return false
+	}
+	for _, m := range req.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, "PERSONA") {
+			return true
+		}
+	}
+	return false
 }

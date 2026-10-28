@@ -417,8 +417,8 @@ func TestReasoningContentSanitized(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 7 项 +
-// sanitizeRewrites 5 对 + 3 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 8 项 +
+// sanitizeRewrites 6 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -433,6 +433,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
+		"workspace root",                                  // DSH file-reference 提示词（2026-10-27 新增词）
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -463,6 +464,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		{
 			"11128",
 			"11-128",
+		},
+		{
+			"workspace root",
+			"workspace base",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
@@ -663,5 +668,82 @@ func TestPrepareBodySanitizesDshWebGui(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "DeepSeek-Harness Web GUI") {
 		t.Errorf("替换文本缺失: %s", out)
+	}
+}
+
+// ---- 2026-10-28 新增：workspace root 与 7 动词句式、可配置词表 ----
+
+// workspace root 是 2026-10-27 上游新增词（CangShui/workbuddy-gateway#28 二分实测），
+// 且这句随 DSH 每个请求的 system 发出（dsh-file-reference 的 FILE_REFERENCE_PROMPT）。
+func TestWorkspaceRootRewritten(t *testing.T) {
+	in := "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	out := sanitizeText(in)
+	if strings.Contains(out, "workspace root") {
+		t.Errorf("workspace root 未被改写: %q", out)
+	}
+	if !strings.Contains(out, "workspace base") {
+		t.Errorf("改写文本缺失: %q", out)
+	}
+	// 语义其余部分不动。
+	if !strings.Contains(out, "absolute paths identify files or directories on the host.") {
+		t.Errorf("同句其他内容被改动: %q", out)
+	}
+}
+
+// 预检必须认出 workspace root（否则净化分支根本不进）。
+func TestWorkspaceRootFingerprintDetected(t *testing.T) {
+	if !hasFingerprint("Relative paths resolve from the workspace root;") {
+		t.Error("workspace root 未被预检识别")
+	}
+	// 大小写变体：用户正文里可能大写复述，预检也要认（2026-10-28 补的小写兜底）。
+	if !hasFingerprint("Relative paths resolve from the WORKSPACE ROOT;") {
+		t.Error("大写变体未被预检识别")
+	}
+}
+
+// 身份句式 7 个动词全覆盖（社区实测集合，见 workbuddy2api-hub#537）。
+func TestDshIdentityAllSevenVerbs(t *testing.T) {
+	for _, verb := range []string{
+		"powered by", "built on", "built by", "created by", "developed by", "made by", "trained by",
+	} {
+		in := "You are an AI agent " + verb + " DeepSeek Harness."
+		if !hasFingerprint(in) {
+			t.Errorf("%q: 预检未识别", verb)
+			continue
+		}
+		out := sanitizeText(in)
+		if strings.Contains(out, "DeepSeek Harness") {
+			t.Errorf("%q: 品牌指纹残留: %q", verb, out)
+		}
+		if !strings.Contains(out, "You are a helpful AI assistant.") {
+			t.Errorf("%q: 未替换为中性句: %q", verb, out)
+		}
+	}
+}
+
+// 可配置词表：features.sanitize_extra_features / _rewrites 注入后立即生效，
+// 且 ConfigureSanitize 幂等（重复调用不会叠加）。
+func TestConfigureSanitizeExtraTerms(t *testing.T) {
+	t.Cleanup(func() { ConfigureSanitize(nil, nil) })
+	in := "please mention ZCode in your answer"
+	if hasFingerprint(in) {
+		t.Fatal("未注入前不应命中")
+	}
+	ConfigureSanitize([]string{"ZCode"}, [][2]string{{"ZCode", "WorkBuddy"}})
+	if !hasFingerprint(in) {
+		t.Fatal("注入后应命中")
+	}
+	if out := sanitizeText(in); strings.Contains(out, "ZCode") || !strings.Contains(out, "WorkBuddy") {
+		t.Errorf("额外改写未生效: %q", out)
+	}
+	// 幂等：再注入一次同一词，替换结果不应翻倍或异常。
+	ConfigureSanitize([]string{"ZCode"}, [][2]string{{"ZCode", "WorkBuddy"}})
+	if out := sanitizeText(in); strings.Count(out, "WorkBuddy") != 1 {
+		t.Errorf("重复注入导致叠加: %q", out)
+	}
+	// 清空后回到不命中。
+	ConfigureSanitize(nil, nil)
+	if hasFingerprint(in) {
+		t.Error("清空后仍命中")
 	}
 }
