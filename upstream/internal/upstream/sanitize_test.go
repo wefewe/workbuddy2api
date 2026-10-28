@@ -417,8 +417,8 @@ func TestReasoningContentSanitized(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 8 项 +
-// sanitizeRewrites 6 对 + 3 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
+// sanitizeRewrites 7 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -434,6 +434,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
 		"workspace root",                                  // DSH file-reference 提示词（2026-10-27 新增词）
+		"Tokens prefixed with @",                          // DSH file-reference 提示词首句（issue #321）
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -468,6 +469,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		{
 			"workspace root",
 			"workspace base",
+		},
+		{
+			"Tokens prefixed with @ are paths the user explicitly referenced",
+			"Tokens prefixed with the at-sign are paths the user explicitly referenced",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
@@ -745,5 +750,22 @@ func TestConfigureSanitizeExtraTerms(t *testing.T) {
 	ConfigureSanitize(nil, nil)
 	if hasFingerprint(in) {
 		t.Error("清空后仍命中")
+	}
+}
+
+// TestSanitizeDshFileReferenceTokens issue #321：DSH file-reference 首句单独出现
+// （不带 workspace root）也必须进入净化并被改写；`@"..."` 示例写法保持原样。
+func TestSanitizeDshFileReferenceTokens(t *testing.T) {
+	in := `Tokens prefixed with @ are paths the user explicitly referenced. @"..." quotes a path containing spaces.`
+	if !hasFingerprint(in) {
+		t.Fatalf("特征预检未命中: %q", in)
+	}
+	got := sanitizeText(in)
+	if strings.Contains(got, "Tokens prefixed with @") {
+		t.Fatalf("改写后仍含触发句: %q", got)
+	}
+	want := `Tokens prefixed with the at-sign are paths the user explicitly referenced. @"..." quotes a path containing spaces.`
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }

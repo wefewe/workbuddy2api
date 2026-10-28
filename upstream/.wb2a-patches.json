@@ -38,5 +38,6 @@
   "0037-channel-path-tests-realm-aware.patch": "31a2d81f6a87124e56dd2907658652a996bc0add1e35caa78a09bbe6767cc42e",
   "0038-gzip-channel-check-uncompressed-retry.patch": "e8bbad5c78b93817e4eeebd52cee23018fe87877a7581c34df2a6278f30fd11c",
   "0039-channel-check-request-scope.patch": "6f1f1bf73f5f596301def7e210715cda897f94080e51b908c950b6a9c77c42f4",
-  "0040-model-block-selfheal-realm-aware.patch": "312d0c45a9f68a7a65ceb8da99d5bfab31ed409e40e291254088c97ac97f3e24"
+  "0040-model-block-selfheal-realm-aware.patch": "312d0c45a9f68a7a65ceb8da99d5bfab31ed409e40e291254088c97ac97f3e24",
+  "0041-dsh-file-reference-tokens-sanitize.patch": "bbf2b7bf2d0c7faa23264668e1e4c16f1c38ae7f8270aa3f607d627bb925984a"
 }

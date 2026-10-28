@@ -21,6 +21,7 @@ var sanitizeFeatures = []string{
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
 	"workspace root",                                  // DSH file-reference 提示词（上游 2026-10-27 新增词，见 CangShui/workbuddy-gateway#28）
+	"Tokens prefixed with @",                          // DSH file-reference 提示词首句（issue #321）
 }
 
 // sanitizeExtraFeatures 运行期从 config 追加的特征（features.sanitize_extra_features）。
@@ -94,6 +95,14 @@ var sanitizeRewrites = [][2]string{
 		// 语义不变（base 与 root 在这里同义）。这条会随 DSH 每个请求发出，优先级最高。
 		"workspace root",
 		"workspace base",
+	},
+	{
+		// file-reference 首句（issue #321 二分实测）：DSH 0.2.1 起 system 里带
+		// "Tokens prefixed with @ are paths the user explicitly referenced."，
+		// 上游对这句原样出现判 11128；仅把 "@" 换成 "the at-sign" 即 200。
+		// 只改这一处字面量，后文 `@"..."` 的示例写法不动，语义不变。
+		"Tokens prefixed with @ are paths the user explicitly referenced",
+		"Tokens prefixed with the at-sign are paths the user explicitly referenced",
 	},
 }
 
