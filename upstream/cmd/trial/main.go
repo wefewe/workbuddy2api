@@ -21,6 +21,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -71,6 +72,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "no auth files in %s\n", authDir)
 		os.Exit(1)
 	}
+	// 出口线路（issue #210 补充）：trial 同样是上游写请求，必须按账号线路出站。
+	upstream.LoadRoutesAndLog(log.Printf)
 	up := upstream.New()
 	// trial 是 global 专属端点：必须开启 global realm 路由，否则 upstream.New() 的
 	// GlobalEnabled 零值 false 会把请求路由到 CN base（codebuddy.cn）而必然失败。

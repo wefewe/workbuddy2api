@@ -25,10 +25,17 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool *pool.Pool
+	// LargeRequestBytes 大上下文请求阈值（本地增强）：请求体 ≥ 该字节数时
+	// 放弃会话粘性、逐请求轮换号池，并在 LargeRequestCooldown 窗口内不再复用
+	// 同一个号 —— 避免短时间内把大量大请求压到单号（上游把该形态判为异常使用）。
+	// 默认 256 KiB；<=0 关闭该策略。
+	LargeRequestBytes int
+	// LargeRequestCooldown 大请求的「同号禁用窗口」：窗口内不再把大请求给同一个号。
+	LargeRequestCooldown time.Duration
+	Upstream             *upstream.Client
+	APIKey               string // 空 = 不鉴权
+	MaxRotate            int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -68,6 +75,11 @@ const notFoundCooldown = 60 * time.Second
 // 抖动复用 backoff.go jitterDur（单一来源，不重复造轮子）。
 const wafCooldownBase = 60 * time.Second
 
+// upstreamRestrictionCooldown 上游「账号异常行为」风控限制的软冷却时长。
+// 这类限制可申诉、会自行解除（现场观测同一账号数小时后恢复 200），
+// 而凭证本身有效 —— 因此只把它移出轮换，不 Disable、不清凭证。
+const upstreamRestrictionCooldown = 45 * time.Minute
+
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
@@ -86,6 +98,45 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+
+	// largeUsed 最近承接过大上下文请求的号（uid → 时刻），见 LargeRequestBytes。
+	largeMu   sync.Mutex
+	largeUsed map[string]time.Time
+}
+
+// largeExclusions 返回「LargeRequestCooldown 窗口内已承接过大请求」的号集合，
+// 顺手清掉过期项。窗口内这些号不再参与大请求选号 —— 这就是逐请求轮换。
+func (h *Handler) largeExclusions(now time.Time) map[string]bool {
+	if h.cfg.LargeRequestBytes <= 0 {
+		return nil // 策略关闭：不排除任何号
+	}
+	h.largeMu.Lock()
+	defer h.largeMu.Unlock()
+	if len(h.largeUsed) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(h.largeUsed))
+	for uid, at := range h.largeUsed {
+		if now.Sub(at) < h.cfg.LargeRequestCooldown {
+			out[uid] = true
+			continue
+		}
+		delete(h.largeUsed, uid)
+	}
+	return out
+}
+
+// noteLargeUse 登记某号刚承接了一次大请求（无论成败，避免紧接着再压给它）。
+func (h *Handler) noteLargeUse(uid string, now time.Time) {
+	if uid == "" {
+		return
+	}
+	h.largeMu.Lock()
+	if h.largeUsed == nil {
+		h.largeUsed = make(map[string]time.Time)
+	}
+	h.largeUsed[uid] = now
+	h.largeMu.Unlock()
 }
 
 // NewHandler 构建 handler。
@@ -96,13 +147,19 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
 	}
+	if cfg.LargeRequestBytes == 0 {
+		cfg.LargeRequestBytes = 256 << 10 // 256 KiB ≈ 6–8 万 token
+	}
+	if cfg.LargeRequestCooldown <= 0 {
+		cfg.LargeRequestCooldown = 90 * time.Second
+	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), largeUsed: make(map[string]time.Time)}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -681,6 +738,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// 大上下文请求：放弃会话粘性、逐请求轮换（本地增强）。
+	// 触发面：上游把「单号短时间承接大量超大上下文」判为异常使用行为（11140）。
+	largeCtx := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes
+	if largeCtx {
+		unbindSticky()
+	}
+
 	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
@@ -695,7 +759,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			pickTried := tried
+			if largeCtx {
+				if extra := h.largeExclusions(time.Now()); len(extra) > 0 {
+					pickTried = make(map[string]bool, len(tried)+len(extra))
+					for k, v := range tried {
+						pickTried[k] = v
+					}
+					for k := range extra {
+						pickTried[k] = true
+					}
+				}
+			}
+			acct = h.cfg.Pool.PickExcludingForRealm(pickTried, bareModel, realm)
+			if acct == nil && largeCtx {
+				// 所有号都在大请求窗口内：退化普通轮换，避免直接 503。
+				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			}
+			if acct != nil && largeCtx {
+				h.noteLargeUse(acct.UID, time.Now())
+			}
 		}
 		if acct == nil {
 			// 自愈：全池被同一个模型挡死时，几乎都是上游**瞬时** 11102（模型注册表
@@ -954,7 +1037,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if stickyKey != "" && h.cfg.Session != nil {
+		if stickyKey != "" && h.cfg.Session != nil && !largeCtx {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
 		if peek.Stream {
@@ -1249,6 +1332,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 拒才走到这里：软冷却让它退出轮换（别被反复选中），但**不清凭证、不标禁用**。
 		if upstream.IsChannelCheck(body) {
 			// chatCompletions 已直接透传；防御调用同样不罚账号。
+			return
+		}
+		if upstream.IsUpstreamRestriction(body) {
+			// 11140 + 「账号存在异常行为，已被限制使用」→ 账号级风控限制（可申诉）。
+			// 与「request illegal / auth_forbidden」不同：限制会解除，凭证没坏 ——
+			// 软冷却期间退出轮换即可，48 分钟后再试，不要永久禁用。
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, upstreamRestrictionCooldown,
+				"upstream restriction ("+upstreamCodeLabel(body, uerr)+", appealable)")
 			return
 		}
 		if strings.Contains(lowerBody, "request illegal") {

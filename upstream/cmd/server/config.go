@@ -150,11 +150,15 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		// 大上下文请求的逐请求轮换（本地增强）：请求体 ≥ large_request_bytes 时
+		// 放弃会话粘性、按请求换号，并在 large_request_cooldown 窗口内不再复用同号。
+		LargeRequestBytes    int    `json:"large_request_bytes"`    // 默认 262144；<=0 关闭
+		LargeRequestCooldown string `json:"large_request_cooldown"` // 默认 "90s"
+		MaxInFlight          int    `json:"max_in_flight"`          // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal    int    `json:"max_in_flight_global"`   // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold     int    `json:"breaker_threshold"`      // 连续失败次数触发熔断，默认 3
+		BreakerCooldown      string `json:"breaker_cooldown"`       // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax   string `json:"breaker_cooldown_max"`   // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
@@ -181,16 +185,17 @@ type Config struct {
 	} `json:"session_sticky"`
 
 	// 解析后
-	SoftRateDur         time.Duration `json:"-"`
-	SoftRateMaxDur      time.Duration `json:"-"`
-	CreditExhaustedDur  time.Duration `json:"-"`
-	BreakerCooldownDur  time.Duration `json:"-"`
-	BreakerCooldownMaxD time.Duration `json:"-"`
-	DegradeCooldownDur  time.Duration `json:"-"`
-	DegradeCooldownMaxD time.Duration `json:"-"`
-	SessionTTL          time.Duration `json:"-"`
-	SessionGCInterval   time.Duration `json:"-"`
-	ExpiringSoonDur     time.Duration `json:"-"`
+	SoftRateDur             time.Duration `json:"-"`
+	SoftRateMaxDur          time.Duration `json:"-"`
+	CreditExhaustedDur      time.Duration `json:"-"`
+	BreakerCooldownDur      time.Duration `json:"-"`
+	BreakerCooldownMaxD     time.Duration `json:"-"`
+	DegradeCooldownDur      time.Duration `json:"-"`
+	DegradeCooldownMaxD     time.Duration `json:"-"`
+	SessionTTL              time.Duration `json:"-"`
+	LargeRequestCooldownDur time.Duration `json:"-"`
+	SessionGCInterval       time.Duration `json:"-"`
+	ExpiringSoonDur         time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 }
@@ -432,6 +437,15 @@ func (c *Config) normalize() error {
 	}
 	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
 		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
+	}
+	if c.Pool.LargeRequestCooldown == "" {
+		c.Pool.LargeRequestCooldown = "90s"
+	}
+	if c.LargeRequestCooldownDur, err = time.ParseDuration(c.Pool.LargeRequestCooldown); err != nil {
+		return fmt.Errorf("pool.large_request_cooldown: %w", err)
+	}
+	if c.Pool.LargeRequestBytes == 0 {
+		c.Pool.LargeRequestBytes = 262144
 	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)

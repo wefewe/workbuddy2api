@@ -1189,6 +1189,26 @@ const (
 // 文案两种语言都可能出现：中文「渠道校验」与英文 displayTips 的 channel verification
 // / official client；`request illegal` 这类历史 msg 也可能随同一封套出现，所以不能
 // 拿 msg 当判据。
+// IsUpstreamRestriction 判断响应是否是上游的「账号风控限制」（不是凭证失效）。
+//
+// 现场（2026-11-01，CN）：403 + `{"code":11140,"msg":"request illegal"}`，但封套里
+// displayMsg 明确写着「账号存在异常行为，已被限制使用」、displayTips 让用户「提交反馈
+// 申诉」。这类限制是**可申诉、会自行解除**的账号级风控，不是 OAuth 凭证被拒 ——
+// 按永久禁用处理会把还能救回来的号直接踢出池子（现场 6 个号被误标为「需重新登录」）。
+//
+// 只认带「异常行为 / unusual activity」话术的 11140；不带这层话术的
+// `request illegal`（历史上 global 的 auth_forbidden）仍走原有硬禁用策略。
+func IsUpstreamRestriction(body string) bool {
+	if !strings.Contains(body, "11140") {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "unusual activity") ||
+		strings.Contains(body, "异常行为") ||
+		strings.Contains(body, "異常行為") ||
+		strings.Contains(lower, "abnormal")
+}
+
 func IsChannelCheck(body string) bool {
 	lower := strings.ToLower(body)
 	if !codeMarker(lower, "11128") && !codeMarker(lower, "11-128") {

@@ -37,6 +37,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "no auth files in %s\n", dir)
 		os.Exit(1)
 	}
+	// 出口线路（issue #210 补充）：独立二进制不走 cmd/server 的 config 解析，
+	// 必须自己读 config.json 的 proxies 段，否则绑了线路的账号在这里会直接报
+	// 「出口线路不可用」，没绑的则静默走家宽默认出口——两者都不是想要的。
+	upstream.LoadRoutesAndLog(log.Printf)
 	up := upstream.New()
 	// 允许按 realm 路由：global 账号的签到/余额会打到 global base（workbuddy.ai），
 	// 由幂等码兜底为「未开启/不适用」，而不是误打到 CN base 产生签到成功的假象。

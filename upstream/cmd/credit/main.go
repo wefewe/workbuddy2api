@@ -18,6 +18,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -42,6 +43,9 @@ func main() {
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		authDir = v
 	}
+	// 出口线路（issue #210 补充）：查积分同样是上游请求，绑了线路的账号必须从
+	// 对应出口走，否则「查余额」这一个动作就足以把家宽 IP 暴露给平台。
+	upstream.LoadRoutesAndLog(log.Printf)
 	up := upstream.New()
 	up.GlobalEnabled = true // 允许按 realm 路由：global 账查积分走 workbuddy.ai
 	accounts := collect(authDir, up)
