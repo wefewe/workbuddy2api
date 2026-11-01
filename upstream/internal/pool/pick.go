@@ -238,7 +238,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
 		}
-		if e.disabled || e.manualDisabled {
+		if e.disabled || e.manualDisabled || e.refreshRiskActive(now) {
 			continue // 禁用/手动停用的账号永不参与兜底
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {

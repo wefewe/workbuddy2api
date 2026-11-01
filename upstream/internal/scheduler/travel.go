@@ -72,7 +72,7 @@ func (s *Scheduler) RunTravelNow() {
 func (s *Scheduler) runTravel(ctx context.Context) {
 	first := true
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)

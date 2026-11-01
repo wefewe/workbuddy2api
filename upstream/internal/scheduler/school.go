@@ -108,6 +108,14 @@ func runScriptContext(ctx context.Context, name, root string, commands [][]strin
 func (s *Scheduler) RunSchoolNow() { s.runSchool(context.Background()) }
 
 func (s *Scheduler) runSchool(ctx context.Context) {
+	if s.cfg.Pool != nil {
+		for _, account := range s.cfg.Pool.List() {
+			if s.cfg.Pool.RiskPaused(account.UID) {
+				log.Printf("scheduled school skipped: token refresh safety pause")
+				return
+			}
+		}
+	}
 	root := repoRoot()
 	runScriptContext(ctx, "school", root, [][]string{
 		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}),
@@ -120,6 +128,14 @@ func (s *Scheduler) runSchool(ctx context.Context) {
 func (s *Scheduler) RunCatNow() { s.runCat(context.Background()) }
 
 func (s *Scheduler) runCat(ctx context.Context) {
+	if s.cfg.Pool != nil {
+		for _, account := range s.cfg.Pool.List() {
+			if s.cfg.Pool.RiskPaused(account.UID) {
+				log.Printf("scheduled cat skipped: token refresh safety pause")
+				return
+			}
+		}
+	}
 	root := repoRoot()
 	runScriptContext(ctx, "cat", root, [][]string{
 		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"}),

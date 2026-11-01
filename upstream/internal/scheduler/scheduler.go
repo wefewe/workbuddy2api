@@ -506,7 +506,7 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	}
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
-		if st.Disabled {
+		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
 			oc.Status, oc.Detail = CheckinSkipped, "disabled"
 			skipN++
 			out = append(out, oc)
@@ -657,7 +657,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 	count := s.cfg.ActivityReportCount
 	first := true
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
@@ -895,13 +895,19 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background()) }
 
 func (s *Scheduler) runKeepalive(ctx context.Context) {
+	checked, okN, failed, skipped := 0, 0, 0, 0
+	defer func() {
+		log.Printf("keepalive done: checked=%d ok=%d failed=%d skipped=%d", checked, okN, failed, skipped)
+	}()
 	first := true
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
+			skipped++
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			skipped++
 			continue
 		}
 		if !first && !sleepCtx(ctx, s.accountGap(ctx, 0)) {
@@ -911,7 +917,9 @@ func (s *Scheduler) runKeepalive(ctx context.Context) {
 			return
 		}
 		first = false
+		checked++
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+			failed++
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -921,6 +929,8 @@ func (s *Scheduler) runKeepalive(ctx context.Context) {
 			}
 			continue
 		}
+		okN++
+		log.Printf("keepalive %s: ok", logfmt.Label(st.UID, st.Nickname))
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
 		a.BackfillRealm()                   // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
 		if err := a.SaveAtomic(); err != nil {

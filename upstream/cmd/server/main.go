@@ -136,6 +136,9 @@ func main() {
 	}
 
 	up := upstream.New()
+	up.RefreshPaused = p.RiskPaused
+	up.OnRefreshRateLimit = func(uid string, retryAfter time.Duration) { p.PauseRefreshRateLimited(uid, retryAfter) }
+	up.OnRefreshSuccess = p.NoteRefreshSuccess
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。

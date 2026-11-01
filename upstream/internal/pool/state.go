@@ -475,7 +475,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	// 清理 cooledReasonLocked 同口径）。disabled 账号的 reason 是禁用原因，保留。
 	_, reason := cooledReasonLocked(e, now)
 	st := Status{
-		UID: uid,
+		RefreshRisk: e.refreshRiskStatus(now),
+		UID:         uid,
 		// 限额台账（issue #36）：仅「带解析时间 6004 的模型级软冷却」仍在生效时非空，
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，
@@ -489,7 +490,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Credits:    e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
 		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
-		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil) || e.refreshRiskActive(now),
 		Reason:           reason,
 		Disabled:         e.disabled,
 		ManualDisabled:   e.manualDisabled,
@@ -537,6 +538,16 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		if st.Reason == "" && now.Before(e.degradeUntil) {
 			st.Reason = degradeReason
 			st.CoolKind = "degrade"
+		}
+	}
+	if e.refreshRiskActive(now) {
+		st.CoolKind = "refresh_risk"
+		st.Reason = "token refresh HTTP 429; bounded account backoff"
+		if e.refreshRisk.NeedsReview {
+			st.Reason = "token refresh repeated HTTP 429; manual review required"
+		}
+		if remaining := e.refreshRisk.Until - now.Unix(); remaining > st.CoolRemaining {
+			st.CoolRemaining = remaining
 		}
 	}
 	return st

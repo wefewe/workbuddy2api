@@ -726,7 +726,10 @@ type apiEnvelope struct {
 
 // Client 上游 HTTP 客户端。Base 字段可覆盖便于测试。
 type Client struct {
-	HTTP *http.Client
+	RefreshPaused      func(uid string) bool
+	OnRefreshRateLimit func(uid string, retryAfter time.Duration)
+	OnRefreshSuccess   func(uid string)
+	HTTP               *http.Client
 
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
@@ -1058,7 +1061,11 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		retryAfter := time.Duration(0)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter = refreshRetryAfter(resp.Header, raw)
+		}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RetryAfter: retryAfter}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -1093,7 +1100,15 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //     独占 a.mu，阻塞同账号的 SaveAtomic / 其他刷新（issue:持锁 120s I/O）。
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
-func (c *Client) RefreshToken(a *auth.Auth) error {
+func (c *Client) RefreshToken(a *auth.Auth) (err error) {
+	if c.RefreshPaused != nil && c.RefreshPaused(a.UID) {
+		return &Error{Kind: ErrSoftRate, Status: http.StatusTooManyRequests, Msg: "token refresh safety pause active"}
+	}
+	defer func() {
+		if err == nil && c.OnRefreshSuccess != nil {
+			c.OnRefreshSuccess(a.UID)
+		}
+	}()
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken
@@ -1130,6 +1145,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	// 网络 I/O（锁外，30s 上限）。
 	data, err := c.doJSON(&hdrSnapshot, req)
 	if err != nil {
+		var upstreamErr *Error
+		if errors.As(err, &upstreamErr) && upstreamErr.Status == 429 && c.OnRefreshRateLimit != nil {
+			c.OnRefreshRateLimit(a.UID, upstreamErr.RetryAfter)
+		}
 		return err
 	}
 	var tok struct {

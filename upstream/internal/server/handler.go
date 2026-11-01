@@ -175,6 +175,9 @@ func NewHandler(cfg Config) *Handler {
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
+		h.mux.HandleFunc("POST /admin/accounts/{uid}/refresh-risk", h.withAuth(h.adminRefreshRisk))
+		h.mux.HandleFunc("POST /admin/accounts/{uid}/refresh-risk/clear", h.withAuth(h.adminClearRefreshRisk))
+		h.mux.HandleFunc("POST /admin/accounts/{uid}/refresh-risk/success", h.withAuth(h.adminRefreshRiskSuccess))
 		h.mux.HandleFunc("POST /admin/accounts/{uid}/models/{model}/available", h.withAuth(h.adminModelAvailable))
 	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
