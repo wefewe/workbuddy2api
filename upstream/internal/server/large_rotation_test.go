@@ -5,14 +5,28 @@ import (
 	"time"
 )
 
-// 大上下文请求的逐请求轮换：窗口内同号不再被选中，窗口过后恢复。
-func TestLargeExclusionsWindow(t *testing.T) {
+// 默认关闭：未配置 large_request_cooldown 时既不轮换也不排除任何号。
+// 轮换会让上游的前缀缓存整段 miss，长上下文每轮都按全量计费，代价远大于收益。
+func TestLargeRotationOffByDefault(t *testing.T) {
 	h := NewHandler(Config{})
 	if h.cfg.LargeRequestBytes != 256<<10 {
 		t.Fatalf("默认阈值 = %d, want 262144", h.cfg.LargeRequestBytes)
 	}
+	if h.cfg.LargeRequestCooldown != 0 {
+		t.Fatalf("默认窗口 = %v, want 0（关闭）", h.cfg.LargeRequestCooldown)
+	}
+	now := time.Now()
+	h.noteLargeUse("u1", now)
+	if got := h.largeExclusions(now); len(got) != 0 {
+		t.Fatalf("默认关闭时不应排除任何号, got %v", got)
+	}
+}
+
+// 显式打开后：窗口内同号不再被选中，窗口过后恢复。
+func TestLargeExclusionsWindow(t *testing.T) {
+	h := NewHandler(Config{LargeRequestCooldown: 90 * time.Second})
 	if h.cfg.LargeRequestCooldown != 90*time.Second {
-		t.Fatalf("默认窗口 = %v, want 90s", h.cfg.LargeRequestCooldown)
+		t.Fatalf("显式窗口 = %v, want 90s", h.cfg.LargeRequestCooldown)
 	}
 
 	now := time.Now()

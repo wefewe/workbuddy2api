@@ -150,10 +150,12 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		// 大上下文请求的逐请求轮换（本地增强）：请求体 ≥ large_request_bytes 时
-		// 放弃会话粘性、按请求换号，并在 large_request_cooldown 窗口内不再复用同号。
+		// 大上下文请求的逐请求轮换（本地增强，默认关闭）：只有
+		// large_request_cooldown > 0 时才生效。请求体 ≥ large_request_bytes 时放弃
+		// 会话粘性、按请求换号，并在窗口内不再复用同号。前缀缓存按账号存放，轮换会让
+		// 长上下文的缓存整段失效，所以默认 "0s"（关闭），风控现场再显式打开。
 		LargeRequestBytes    int    `json:"large_request_bytes"`    // 默认 262144；<=0 关闭
-		LargeRequestCooldown string `json:"large_request_cooldown"` // 默认 "90s"
+		LargeRequestCooldown string `json:"large_request_cooldown"` // 默认 "0s"（关闭）；>0 才启用轮换
 		MaxInFlight          int    `json:"max_in_flight"`          // 单账号最大在途请求数，0 = 不限
 		MaxInFlightGlobal    int    `json:"max_in_flight_global"`   // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
 		BreakerThreshold     int    `json:"breaker_threshold"`      // 连续失败次数触发熔断，默认 3
@@ -439,7 +441,7 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
 	}
 	if c.Pool.LargeRequestCooldown == "" {
-		c.Pool.LargeRequestCooldown = "90s"
+		c.Pool.LargeRequestCooldown = "0s" // 空 = 关闭逐请求轮换（默认）
 	}
 	if c.LargeRequestCooldownDur, err = time.ParseDuration(c.Pool.LargeRequestCooldown); err != nil {
 		return fmt.Errorf("pool.large_request_cooldown: %w", err)

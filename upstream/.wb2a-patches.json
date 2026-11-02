@@ -43,5 +43,7 @@
   "0042-offline-tools-egress-routes.patch": "db4c313f7e610400541cfaaf87ecafa9cdf0368ea47a193d7235d4e1eccb441a",
   "0043-upstream-restriction-soft-cooldown.patch": "472d5c26b363636a0c2394430445c2e0844730ed928688a12acb4afeb189d816",
   "0044-large-request-rotation.patch": "ba409f4820093eefa016a215e8764907b6ff271ce397b0c55d576779a32146b0",
-  "0045-account-refresh-risk-pause.patch": "2c58bf6ef40be46a045773dca27fe97c4c43de3aac398e6617c7e763f448c1f6"
+  "0045-account-refresh-risk-pause.patch": "2c58bf6ef40be46a045773dca27fe97c4c43de3aac398e6617c7e763f448c1f6",
+  "0046-large-request-cache-friendly.patch": "280dc5995ffd54c5824b41454276c2045d7a3f89536b845dd94ae9b42d880b4e",
+  "0047-11140-ban-state.patch": "29fa08fb522853d69a74596709051fd75de586a818855bcd9582b7c4efff1a60"
 }

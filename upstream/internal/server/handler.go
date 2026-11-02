@@ -107,7 +107,7 @@ type Handler struct {
 // largeExclusions 返回「LargeRequestCooldown 窗口内已承接过大请求」的号集合，
 // 顺手清掉过期项。窗口内这些号不再参与大请求选号 —— 这就是逐请求轮换。
 func (h *Handler) largeExclusions(now time.Time) map[string]bool {
-	if h.cfg.LargeRequestBytes <= 0 {
+	if h.cfg.LargeRequestBytes <= 0 || h.cfg.LargeRequestCooldown <= 0 {
 		return nil // 策略关闭：不排除任何号
 	}
 	h.largeMu.Lock()
@@ -150,9 +150,8 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.LargeRequestBytes == 0 {
 		cfg.LargeRequestBytes = 256 << 10 // 256 KiB ≈ 6–8 万 token
 	}
-	if cfg.LargeRequestCooldown <= 0 {
-		cfg.LargeRequestCooldown = 90 * time.Second
-	}
+	// LargeRequestCooldown <= 0 = 关闭逐请求轮换（默认）。这里不做缺省兜底：
+	// 轮换与上游按账号存放的前缀缓存互斥，代价见 chatCompletions 的触发处注释。
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
@@ -741,10 +740,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
-	// 大上下文请求：放弃会话粘性、逐请求轮换（本地增强）。
-	// 触发面：上游把「单号短时间承接大量超大上下文」判为异常使用行为（11140）。
-	largeCtx := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes
-	if largeCtx {
+	// 大上下文请求的逐请求轮换（本地增强，默认关闭）。触发面：上游把「单号短时间
+	// 承接大量超大上下文」判为异常使用行为（11140）。代价：前缀缓存按账号存放，
+	// 换号后整段 prompt 必然 miss。实测同一个 300 KB 请求体连发两次，开轮换时
+	// 命中 0，不轮换时第二次命中全部前缀。因此默认不轮换，只有现场确实出现风控
+	// 时才把 large_request_cooldown 设成 > 0 显式打开。
+	largeRotate := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes &&
+		h.cfg.LargeRequestCooldown > 0
+	if largeRotate {
 		unbindSticky()
 	}
 
@@ -763,7 +766,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
 			pickTried := tried
-			if largeCtx {
+			if largeRotate {
 				if extra := h.largeExclusions(time.Now()); len(extra) > 0 {
 					pickTried = make(map[string]bool, len(tried)+len(extra))
 					for k, v := range tried {
@@ -775,11 +778,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			acct = h.cfg.Pool.PickExcludingForRealm(pickTried, bareModel, realm)
-			if acct == nil && largeCtx {
+			if acct == nil && largeRotate {
 				// 所有号都在大请求窗口内：退化普通轮换，避免直接 503。
 				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 			}
-			if acct != nil && largeCtx {
+			if acct != nil && largeRotate {
 				h.noteLargeUse(acct.UID, time.Now())
 			}
 		}
@@ -1040,7 +1043,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if stickyKey != "" && h.cfg.Session != nil && !largeCtx {
+		// 大请求同样绑定：轮换关闭时必须让它吃到前缀缓存，否则长上下文每轮都整段重算。
+		if stickyKey != "" && h.cfg.Session != nil && !largeRotate {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
 		if peek.Stream {
@@ -1338,11 +1342,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			return
 		}
 		if upstream.IsUpstreamRestriction(body) {
-			// 11140 + 「账号存在异常行为，已被限制使用」→ 账号级风控限制（可申诉）。
-			// 与「request illegal / auth_forbidden」不同：限制会解除，凭证没坏 ——
-			// 软冷却期间退出轮换即可，48 分钟后再试，不要永久禁用。
-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, upstreamRestrictionCooldown,
-				"upstream restriction ("+upstreamCodeLabel(body, uerr)+", appealable)")
+			// 11140 + 「账号存在异常行为，已被限制使用」= 上游账号封禁，需向腾讯申诉；
+			// 重新登录不能解除，也不该在池子里反复重试。
+			//
+			// 0043 曾把它当「可自行恢复」做 45 分钟软冷却，但现场反馈是账号一直在
+			// 「冷却中」循环、面板看不出哪个号被封（issue #376）；这里恢复为明确
+			// 禁用并写清原因 —— 面板据此显示「账号被封禁」、移出重登队列、停止
+			// 继续消耗请求（与 #361 的封禁展示同一口径）。
+			h.cfg.Pool.Disable(uid, "account banned by upstream ("+
+				upstreamCodeLabel(body, uerr)+
+				", 账号存在异常行为/已被限制使用, appeal required, re-login ineffective)")
 			return
 		}
 		if strings.Contains(lowerBody, "request illegal") {
