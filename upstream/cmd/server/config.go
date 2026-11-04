@@ -154,13 +154,20 @@ type Config struct {
 		// large_request_cooldown > 0 时才生效。请求体 ≥ large_request_bytes 时放弃
 		// 会话粘性、按请求换号，并在窗口内不再复用同号。前缀缓存按账号存放，轮换会让
 		// 长上下文的缓存整段失效，所以默认 "0s"（关闭），风控现场再显式打开。
-		LargeRequestBytes    int    `json:"large_request_bytes"`    // 默认 262144；<=0 关闭
+		LargeRequestBytes    int    `json:"large_request_bytes"`    // 默认 2097152（2 MiB）；<=0 关闭
 		LargeRequestCooldown string `json:"large_request_cooldown"` // 默认 "0s"（关闭）；>0 才启用轮换
-		MaxInFlight          int    `json:"max_in_flight"`          // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal    int    `json:"max_in_flight_global"`   // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold     int    `json:"breaker_threshold"`      // 连续失败次数触发熔断，默认 3
-		BreakerCooldown      string `json:"breaker_cooldown"`       // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax   string `json:"breaker_cooldown_max"`   // 指数退避封顶，默认 "6h"
+		// 大请求预算（推荐策略）：滑动窗口内某号承接的大请求达到该条数后，下一条大请求
+		// 不再给它（会话迁移到别的号），窗口滑过后自动恢复。默认 6；<=0 关闭预算机制。
+		// 与 large_request_cooldown 互斥：预算 > 0 时走预算，否则按 cooldown 走逐请求轮换。
+		LargeRequestBudget int `json:"large_request_budget"`
+		// LargeRequestBudgetWindow 预算的滑动窗口，默认 "120s"。
+		LargeRequestBudgetWindow string `json:"large_request_budget_window"`
+		CreditFloor              int64  `json:"credit_floor"`         // 保底积分（issue #364）：低于该值的账号只作最后候选，0 = 关闭
+		MaxInFlight              int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal        int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold         int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown          string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax       string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
@@ -187,17 +194,18 @@ type Config struct {
 	} `json:"session_sticky"`
 
 	// 解析后
-	SoftRateDur             time.Duration `json:"-"`
-	SoftRateMaxDur          time.Duration `json:"-"`
-	CreditExhaustedDur      time.Duration `json:"-"`
-	BreakerCooldownDur      time.Duration `json:"-"`
-	BreakerCooldownMaxD     time.Duration `json:"-"`
-	DegradeCooldownDur      time.Duration `json:"-"`
-	DegradeCooldownMaxD     time.Duration `json:"-"`
-	SessionTTL              time.Duration `json:"-"`
-	LargeRequestCooldownDur time.Duration `json:"-"`
-	SessionGCInterval       time.Duration `json:"-"`
-	ExpiringSoonDur         time.Duration `json:"-"`
+	SoftRateDur                 time.Duration `json:"-"`
+	SoftRateMaxDur              time.Duration `json:"-"`
+	CreditExhaustedDur          time.Duration `json:"-"`
+	BreakerCooldownDur          time.Duration `json:"-"`
+	BreakerCooldownMaxD         time.Duration `json:"-"`
+	DegradeCooldownDur          time.Duration `json:"-"`
+	DegradeCooldownMaxD         time.Duration `json:"-"`
+	SessionTTL                  time.Duration `json:"-"`
+	LargeRequestCooldownDur     time.Duration `json:"-"`
+	LargeRequestBudgetWindowDur time.Duration `json:"-"`
+	SessionGCInterval           time.Duration `json:"-"`
+	ExpiringSoonDur             time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 }
@@ -446,8 +454,20 @@ func (c *Config) normalize() error {
 	if c.LargeRequestCooldownDur, err = time.ParseDuration(c.Pool.LargeRequestCooldown); err != nil {
 		return fmt.Errorf("pool.large_request_cooldown: %w", err)
 	}
+	if c.Pool.LargeRequestBudgetWindow == "" {
+		c.Pool.LargeRequestBudgetWindow = "120s"
+	}
+	if c.LargeRequestBudgetWindowDur, err = time.ParseDuration(c.Pool.LargeRequestBudgetWindow); err != nil {
+		return fmt.Errorf("pool.large_request_budget_window: %w", err)
+	}
+	if c.Pool.LargeRequestBudget == 0 {
+		c.Pool.LargeRequestBudget = 6
+	}
 	if c.Pool.LargeRequestBytes == 0 {
-		c.Pool.LargeRequestBytes = 262144
+		c.Pool.LargeRequestBytes = 2 << 20
+	}
+	if c.Pool.CreditFloor < 0 {
+		c.Pool.CreditFloor = 0
 	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)

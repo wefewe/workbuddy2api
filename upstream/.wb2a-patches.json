@@ -45,5 +45,8 @@
   "0044-large-request-rotation.patch": "ba409f4820093eefa016a215e8764907b6ff271ce397b0c55d576779a32146b0",
   "0045-account-refresh-risk-pause.patch": "2c58bf6ef40be46a045773dca27fe97c4c43de3aac398e6617c7e763f448c1f6",
   "0046-large-request-cache-friendly.patch": "280dc5995ffd54c5824b41454276c2045d7a3f89536b845dd94ae9b42d880b4e",
-  "0047-11140-ban-state.patch": "29fa08fb522853d69a74596709051fd75de586a818855bcd9582b7c4efff1a60"
+  "0047-11140-ban-state.patch": "29fa08fb522853d69a74596709051fd75de586a818855bcd9582b7c4efff1a60",
+  "0048-large-request-budget.patch": "9afcddd2acf365cabb590fe4cacf4236c40dd0d4b5a8846c667d60394a5fe415",
+  "0049-wire-large-request-budget.patch": "0ce65447024baaffd96f06b6daf27ed6f9e8a2f74fe2f38430bcb403b6b6c489",
+  "0050-credit-floor.patch": "461114f67f5f426f4b228a0ee87ae0d2e294b60c08235d11925eeca331348133"
 }

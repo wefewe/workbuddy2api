@@ -29,13 +29,21 @@ type Config struct {
 	// LargeRequestBytes 大上下文请求阈值（本地增强）：请求体 ≥ 该字节数时
 	// 放弃会话粘性、逐请求轮换号池，并在 LargeRequestCooldown 窗口内不再复用
 	// 同一个号 —— 避免短时间内把大量大请求压到单号（上游把该形态判为异常使用）。
-	// 默认 256 KiB；<=0 关闭该策略。
+	// 默认 2 MiB（≈52 万 token）：低于实测封号画像的 61–65 万 token —— 这类请求仍会
+	// 被摊开，而不至于把正常长对话也切碎、丢掉上游前缀缓存；<=0 关闭该策略。
 	LargeRequestBytes int
 	// LargeRequestCooldown 大请求的「同号禁用窗口」：窗口内不再把大请求给同一个号。
 	LargeRequestCooldown time.Duration
-	Upstream             *upstream.Client
-	APIKey               string // 空 = 不鉴权
-	MaxRotate            int    // 单请求最多换号次数，默认 3
+	// LargeRequestBudget 大请求预算：窗口内某号承接大请求达到该条数后才让出下一条；
+	// 粘性保持不变，只在超预算时迁移会话（推荐策略）。<=0 关闭预算机制。
+	LargeRequestBudget int
+	// LargeRequestBudgetWindow 预算的滑动窗口。
+	LargeRequestBudgetWindow time.Duration
+	// CreditFloor 保底积分（issue #364）：低于该值的账号只作最后候选；0 = 关闭。
+	CreditFloor int64
+	Upstream    *upstream.Client
+	APIKey      string // 空 = 不鉴权
+	MaxRotate   int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -101,14 +109,23 @@ type Handler struct {
 
 	// largeUsed 最近承接过大上下文请求的号（uid → 时刻），见 LargeRequestBytes。
 	largeMu   sync.Mutex
-	largeUsed map[string]time.Time
+	largeUsed map[string][]time.Time
 }
 
 // largeExclusions 返回「LargeRequestCooldown 窗口内已承接过大请求」的号集合，
 // 顺手清掉过期项。窗口内这些号不再参与大请求选号 —— 这就是逐请求轮换。
 func (h *Handler) largeExclusions(now time.Time) map[string]bool {
-	if h.cfg.LargeRequestBytes <= 0 || h.cfg.LargeRequestCooldown <= 0 {
+	if h.cfg.LargeRequestBytes <= 0 {
 		return nil // 策略关闭：不排除任何号
+	}
+	budgetMode := h.cfg.LargeRequestBudget > 0 && h.cfg.LargeRequestBudgetWindow > 0
+	rotateMode := !budgetMode && h.cfg.LargeRequestCooldown > 0
+	if !budgetMode && !rotateMode {
+		return nil
+	}
+	window := h.cfg.LargeRequestBudgetWindow
+	if !budgetMode {
+		window = h.cfg.LargeRequestCooldown
 	}
 	h.largeMu.Lock()
 	defer h.largeMu.Unlock()
@@ -116,12 +133,26 @@ func (h *Handler) largeExclusions(now time.Time) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(h.largeUsed))
-	for uid, at := range h.largeUsed {
-		if now.Sub(at) < h.cfg.LargeRequestCooldown {
-			out[uid] = true
+	for uid, stamps := range h.largeUsed {
+		kept := stamps[:0]
+		for _, at := range stamps {
+			if now.Sub(at) < window {
+				kept = append(kept, at)
+			}
+		}
+		if len(kept) == 0 {
+			delete(h.largeUsed, uid)
 			continue
 		}
-		delete(h.largeUsed, uid)
+		h.largeUsed[uid] = kept
+		if budgetMode {
+			// 预算模式：只有窗口内已用满预算的号才让出。
+			if len(kept) >= h.cfg.LargeRequestBudget {
+				out[uid] = true
+			}
+			continue
+		}
+		out[uid] = true // legacy 轮换：窗口内用过即排除
 	}
 	return out
 }
@@ -133,9 +164,9 @@ func (h *Handler) noteLargeUse(uid string, now time.Time) {
 	}
 	h.largeMu.Lock()
 	if h.largeUsed == nil {
-		h.largeUsed = make(map[string]time.Time)
+		h.largeUsed = make(map[string][]time.Time)
 	}
-	h.largeUsed[uid] = now
+	h.largeUsed[uid] = append(h.largeUsed[uid], now)
 	h.largeMu.Unlock()
 }
 
@@ -147,8 +178,17 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
 	}
+	if cfg.LargeRequestBudgetWindow <= 0 {
+		cfg.LargeRequestBudgetWindow = 120 * time.Second
+	}
+	if cfg.LargeRequestBudget == 0 {
+		cfg.LargeRequestBudget = 6
+	}
+	if cfg.Pool != nil {
+		cfg.Pool.SetCreditFloor(cfg.CreditFloor)
+	}
 	if cfg.LargeRequestBytes == 0 {
-		cfg.LargeRequestBytes = 256 << 10 // 256 KiB ≈ 6–8 万 token
+		cfg.LargeRequestBytes = 2 << 20 // 2 MiB ≈ 52 万 token：只切接近封号画像量级的超大上下文
 	}
 	// LargeRequestCooldown <= 0 = 关闭逐请求轮换（默认）。这里不做缺省兜底：
 	// 轮换与上游按账号存放的前缀缓存互斥，代价见 chatCompletions 的触发处注释。
@@ -158,7 +198,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), largeUsed: make(map[string]time.Time)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), largeUsed: make(map[string][]time.Time)}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -745,17 +785,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 换号后整段 prompt 必然 miss。实测同一个 300 KB 请求体连发两次，开轮换时
 	// 命中 0，不轮换时第二次命中全部前缀。因此默认不轮换，只有现场确实出现风控
 	// 时才把 large_request_cooldown 设成 > 0 显式打开。
-	largeRotate := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes &&
-		h.cfg.LargeRequestCooldown > 0
-	if largeRotate {
+	// 大请求两种策略，二选一：
+	//   budget（默认，推荐）：粘性照旧；只有「窗口内已接满预算」的号让出这一条大请求，
+	//     命中后会话随之迁移（一次迁移，之后继续命中新号的前缀缓存）；
+	//   rotate（legacy，需 large_request_cooldown>0 且未启用预算）：逐请求换号。
+	largeReq := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes
+	budgetMode := largeReq && h.cfg.LargeRequestBudget > 0 && h.cfg.LargeRequestBudgetWindow > 0
+	rotateMode := largeReq && !budgetMode && h.cfg.LargeRequestCooldown > 0
+	if rotateMode {
 		unbindSticky()
+	}
+	var hotAccounts map[string]bool
+	if budgetMode || rotateMode {
+		hotAccounts = h.largeExclusions(time.Now())
 	}
 
 	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if stickyUID != "" && !(budgetMode && hotAccounts[stickyUID]) {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。
@@ -766,8 +815,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
 			pickTried := tried
-			if largeRotate {
-				if extra := h.largeExclusions(time.Now()); len(extra) > 0 {
+			if rotateMode || budgetMode {
+				if extra := hotAccounts; len(extra) > 0 {
 					pickTried = make(map[string]bool, len(tried)+len(extra))
 					for k, v := range tried {
 						pickTried[k] = v
@@ -778,13 +827,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			acct = h.cfg.Pool.PickExcludingForRealm(pickTried, bareModel, realm)
-			if acct == nil && largeRotate {
+			if acct == nil && (rotateMode || budgetMode) {
 				// 所有号都在大请求窗口内：退化普通轮换，避免直接 503。
 				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 			}
-			if acct != nil && largeRotate {
-				h.noteLargeUse(acct.UID, time.Now())
-			}
+		}
+		// 记账在选号之后统一做：粘性路径同样要计数，否则「一直粘同一个号」永远不会
+		// 把预算用满，预算机制形同虚设（ResolveForModel 在无绑定时会预分配号，
+		// 首条请求走的就是粘性分支）。
+		if acct != nil && (rotateMode || budgetMode) {
+			h.noteLargeUse(acct.UID, time.Now())
 		}
 		if acct == nil {
 			// 自愈：全池被同一个模型挡死时，几乎都是上游**瞬时** 11102（模型注册表
@@ -1044,7 +1096,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
 		// 大请求同样绑定：轮换关闭时必须让它吃到前缀缓存，否则长上下文每轮都整段重算。
-		if stickyKey != "" && h.cfg.Session != nil && !largeRotate {
+		if stickyKey != "" && h.cfg.Session != nil && !rotateMode {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
 		if peek.Stream {

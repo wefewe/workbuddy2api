@@ -63,6 +63,20 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		cands = append(cands, e)
 	}
+	// 保底积分（issue #364）：优先从「积分不低于 floor」的账号里选。全部低于保底
+	// 时保留原候选，不让阈值把池子清空（宁可继续用，也不要 503）。
+	// credits == 0 视为「未知」，不参与判断（启动时余额还没同步）。
+	if p.creditFloor > 0 {
+		above := make([]*entry, 0, len(cands))
+		for _, e := range cands {
+			if e.credits <= 0 || e.credits >= p.creditFloor {
+				above = append(above, e)
+			}
+		}
+		if len(above) > 0 {
+			cands = above
+		}
+	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。

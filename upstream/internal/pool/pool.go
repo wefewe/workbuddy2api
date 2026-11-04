@@ -29,6 +29,10 @@ type Pool struct {
 	// 「硬冷却到次日 04:00，等签到恢复」）。配了就只退出这一小段，到期回到候选池
 	// —— 用户可能在期间充值、上游也可能刷新额度，挂一整天是浪费。
 	creditExhausted time.Duration
+	// creditFloor 保底积分（issue #364）：账号可用积分低于该值时不再被选中，
+	// 除非没有别的候选（否则阈值设高会直接 503）。`credits > 0` 才判断 —— 0 同时
+	// 表示「还没同步到余额」，启动时不能因此把整池排除。0 = 关闭（默认）。
+	creditFloor int64
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -132,6 +136,25 @@ func (p *Pool) SetCreditExhausted(d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.creditExhausted = d
+}
+
+// SetCreditFloor 设置保底积分（issue #364）：低于该值的账号只作为最后候选。
+// 0 或负数 = 关闭。credits==0（未知）不受影响，避免启动时误排除整池。
+func (p *Pool) SetCreditFloor(floor int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if floor < 0 {
+		floor = 0
+	}
+	p.creditFloor = floor
+}
+
+// creditFloorOKLocked 该账号是否满足保底积分；调用方必须已持有 p.mu。
+func (p *Pool) creditFloorOKLocked(e *entry) bool {
+	if p.creditFloor <= 0 || e.credits <= 0 {
+		return true
+	}
+	return e.credits >= p.creditFloor
 }
 
 // SetCostExploreInterval 注入 costTier 条件探索窗口（main 从 config 解析后调用，

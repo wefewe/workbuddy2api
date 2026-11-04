@@ -354,6 +354,11 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	if p.inFlightFull(e) {
 		return nil
 	}
+	// 保底积分（issue #364）：粘性号跌破阈值时也要让位，否则「一直用同一个号」
+	// 会把保底直接吃穿。返回 nil 后 handler 会解绑并重新选号。
+	if !p.creditFloorOKLocked(e) {
+		return nil
+	}
 	e.lastUsed = now
 	// 粘性路径同样推进 usedSeq/pickSeq：粘性重度使用的账号在 LRU 兜底
 	// （pick 按 usedSeq 选最旧）眼中不再是"最旧"，与 pick 的严格全序语义对齐
