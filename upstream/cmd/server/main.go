@@ -86,6 +86,11 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	// 账号级出口线路（issue #210）：面板绑在线路名上，这里把名字解析成地址。
 	upstream.ConfigureProxies(cfg.Proxies)
+	// 出站 HTTP/2（issue #392）：默认关闭，开启后由标准库按 ALPN 协商。
+	upstream.ConfigureHTTP2(cfg.Upstream.HTTP2)
+	if cfg.Upstream.HTTP2 {
+		log.Printf("出站 HTTP/2 已启用（upstream.http2=true）——请确认 SSE 长流与代理线路可用")
+	}
 	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
 	// 只看 content 的客户端又空了"变成悬案。
 	upstream.ConfigureReasoningFallback(cfg.ReasoningAsContent == nil || *cfg.ReasoningAsContent)
@@ -153,6 +158,12 @@ func main() {
 	// 上游逐词扩充黑名单时改 config.json 重启即可，不必重编译镜像。
 	// 空表 = 只用内置静态表（行为与旧版一致）。
 	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
+	// 配置变更时热重载词表（issue #396）：重启会断在途请求，而词表是整体替换语义。
+	if *cfgPath != "" {
+		stopSanitizeWatch := make(chan struct{})
+		defer close(stopSanitizeWatch)
+		go watchSanitizeConfig(*cfgPath, stopSanitizeWatch)
+	}
 	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
 		log.Printf("净化额外特征词表已加载：%d 条（config.json features.sanitize_extra_features）", n)
 	}

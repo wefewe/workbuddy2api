@@ -1023,6 +1023,43 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
+// TestChat429ReportsEarliestReset 多号同时限流时返回**最早**恢复的那条原文（issue #403）。
+//
+// 整池在最早那个号重置时就能服务；用最后轮到的号的时间会让客户端白等一整个周期。
+func TestChat429ReportsEarliestReset(t *testing.T) {
+	early := time.Now().Add(5 * time.Minute)
+	late := time.Now().Add(2 * time.Hour)
+	fmtTS := func(at time.Time) string {
+		return at.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	}
+	earlyTS, lateTS := fmtTS(early), fmtTS(late)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-a" {
+			return 429, `{"code":6004,"msg":"将在 ` + earlyTS + ` UTC+8 重置","requestId":"a"}`, false
+		}
+		return 429, `{"code":6004,"msg":"将在 ` + lateTS + ` UTC+8 重置","requestId":"b"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "b", AccessToken: "at-b", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s (want 429)", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, earlyTS) {
+		t.Errorf("429 文案应给最早恢复时间 %s，got %s", earlyTS, body)
+	}
+	if strings.Contains(body, lateTS) {
+		t.Errorf("429 文案不该给更晚的重置时间 %s，got %s", lateTS, body)
+	}
+}
+
 // TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
 // （现状不变）。
 func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
@@ -2460,7 +2497,7 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 }
 
 // TestStaleSnapshotBoundedByPickGate 粘性快照陈旧被 Pick 闸兜底的契约锚
-//（pr134-watchlist-analysis.md #10）：
+// （pr134-watchlist-analysis.md #10）：
 // session.ResolveForModel 在取任何锁之前拿 pool 可用性快照——若快照后、Pick 前
 // 粘性号 A 被冷却（快照陈旧判 available），Session 层仍会返回 A 作为建议 uid；
 // 但真正的可用性权威闸是 handler 的 Pool.PickByUIDForModel（锁内新鲜判定

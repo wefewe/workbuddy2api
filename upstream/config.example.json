@@ -53,7 +53,9 @@
     "device_token": "",
     "device_token_file": "",
     "client_name": "WorkBuddy",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "gzip_body": true,
+    "http2": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true,

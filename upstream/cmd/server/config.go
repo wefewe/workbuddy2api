@@ -116,6 +116,9 @@ type Config struct {
 		// 缺省 true：服务器出口带宽窄时（实测 1Mbps）3MB 上下文可省 20s+ 首字节；
 		// 小于阈值（64KB）的请求不压缩，短对话零开销。排障可显式配 false。
 		GzipBody bool `json:"gzip_body"`
+		// HTTP2 出站启用 HTTP/2（issue #392）。默认 false：现行 HTTP/1.1 路径经过
+		// 长流/代理/WAF 验证；开启前请确认 SSE 长流与线路代理在目标网络可用。
+		HTTP2 bool `json:"http2"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -355,6 +358,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.GzipBody = b
+		}
+	}
+	if v := os.Getenv("WB2A_HTTP2"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.HTTP2 = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {

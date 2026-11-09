@@ -93,6 +93,11 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
 		}
+		// tools[].function.description 与 system prompt 同源，同样要过一遍净化
+		// （issue #395）；name 不动，避免破坏工具匹配。
+		if tools, ok := obj["tools"].([]any); ok {
+			sanitizeTools(tools)
+		}
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {

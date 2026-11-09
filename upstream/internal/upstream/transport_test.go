@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -25,6 +26,54 @@ func TestNewDialerParams(t *testing.T) {
 	}
 	if d.Timeout != 10*time.Second || d.KeepAlive != 15*time.Second {
 		t.Errorf("dial params=(%v, %v) want (10s, 15s)", d.Timeout, d.KeepAlive)
+	}
+}
+
+// TestHTTP2Switch：默认关闭 h2（空 TLSNextProto），显式开启后交给标准库 ALPN。
+func TestHTTP2Switch(t *testing.T) {
+	t.Cleanup(func() { ConfigureHTTP2(false) })
+
+	ConfigureHTTP2(false)
+	off := newTransport()
+	if off.ForceAttemptHTTP2 {
+		t.Error("HTTP/2 默认必须关闭（ForceAttemptHTTP2=false）")
+	}
+	if off.TLSNextProto == nil || len(off.TLSNextProto) != 0 {
+		t.Errorf("关闭时必须用非 nil 空映射禁 h2，得到 %#v", off.TLSNextProto)
+	}
+
+	ConfigureHTTP2(true)
+	on := newTransport()
+	if !on.ForceAttemptHTTP2 {
+		t.Error("开启后 ForceAttemptHTTP2 必须为 true")
+	}
+	if on.TLSNextProto != nil {
+		t.Errorf("开启后必须让标准库注入 h2（TLSNextProto=nil），得到 %d 项", len(on.TLSNextProto))
+	}
+}
+
+// TestHTTP2Negotiation 开启后用真实 TLS 服务确认 ALPN 协商到 h2（不是只看字段）。
+func TestHTTP2Negotiation(t *testing.T) {
+	ConfigureHTTP2(true)
+	t.Cleanup(func() { ConfigureHTTP2(false) })
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	tr := newTransport()
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // 测试自签证书
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("h2 请求失败：%v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Errorf("协商结果 ProtoMajor=%d，期望 2（HTTP/2）", resp.ProtoMajor)
 	}
 }
 

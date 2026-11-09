@@ -640,6 +640,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// 多号同时限流时，整池恢复时刻是**最早**那个重置墙钟（issue #403）。记录
+	// 最早的一条 6004 原文，末端若整体仍以限流收场就用它，而不是最后轮到的号
+	// 的（会更晚，让客户端白等一整个周期）。
+	var earliestRateBody string
+	var earliestRateAt time.Time
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
@@ -1071,6 +1076,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrSoftRate {
+				if at, ok := upstream.ParseRateReset(string(respBody)); ok &&
+					(earliestRateAt.IsZero() || at.Before(earliestRateAt)) {
+					earliestRateAt = at
+					earliestRateBody = string(respBody)
+				}
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1214,6 +1226,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+		}
+		// 限流收场：用**最早**恢复的那个号的上游原文（issue #403）。「更晚」的
+		// 那条会让客户端按错误的时间等待，而池子在更早就已能服务。
+		if ue.Kind == upstream.ErrSoftRate && strings.TrimSpace(earliestRateBody) != "" {
+			msg = strings.TrimSpace(earliestRateBody)
+			hint = h.hintOf(ue.Kind, earliestRateBody, bareModel, reqHasImage, ue)
 		}
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)

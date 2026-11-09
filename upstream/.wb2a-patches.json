@@ -48,5 +48,9 @@
   "0047-11140-ban-state.patch": "29fa08fb522853d69a74596709051fd75de586a818855bcd9582b7c4efff1a60",
   "0048-large-request-budget.patch": "9afcddd2acf365cabb590fe4cacf4236c40dd0d4b5a8846c667d60394a5fe415",
   "0049-wire-large-request-budget.patch": "0ce65447024baaffd96f06b6daf27ed6f9e8a2f74fe2f38430bcb403b6b6c489",
-  "0050-credit-floor.patch": "461114f67f5f426f4b228a0ee87ae0d2e294b60c08235d11925eeca331348133"
+  "0050-credit-floor.patch": "461114f67f5f426f4b228a0ee87ae0d2e294b60c08235d11925eeca331348133",
+  "0051-sanitize-tools-description.patch": "72ba6a0678171e77cf61d54c3de8b8ac4301d1bebe6fb78f88894837c1d4d2b4",
+  "0052-sanitize-config-hot-reload.patch": "c8d5f0b332b41d76ed61ba0bcca1f858cc0801790238f6a06660ff9286250a0f",
+  "0053-429-earliest-reset.patch": "a0874670b9a1a0fbd212262bc84590deaabe03b6913b8879ba9e24cde93e45eb",
+  "0054-http2-transport.patch": "900a01e5d662d995dd09393c35f83342596434fbb57722d8ae430b957df853a1"
 }

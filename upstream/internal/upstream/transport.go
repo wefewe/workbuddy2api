@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,9 +77,22 @@ func newDialer() *net.Dialer {
 //     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
 //   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
+//
+// http2Enabled 出站是否允许 HTTP/2（issue #392）。默认关闭：现有部署按 HTTP/1.1
+// 长期验证过，h2 的 SSE 长流、代理线路与 WAF 行为需要现场单独验证后再开。
+var http2Enabled atomic.Bool
+
+// ConfigureHTTP2 设置出站是否启用 HTTP/2（main 启动时调用一次；默认 false）。
+//
+// 开启后不再注入空 TLSNextProto，并打开 ForceAttemptHTTP2，让标准库按 ALPN 协商
+// h2；关闭时保持原来的「空映射真禁 h2」路径，行为与旧版逐字一致。
+func ConfigureHTTP2(on bool) {
+	http2Enabled.Store(on)
+}
+
 func newTransport() *http.Transport {
 	dialer := newDialer()
-	return &http.Transport{
+	tr := &http.Transport{
 		DialContext: dialer.DialContext,
 		// 出口代理：走标准环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY，大小写都认）。
 		//
@@ -86,17 +100,24 @@ func newTransport() *http.Transport {
 		// 默认读环境变量不同 —— 于是「容器里配好代理、curl 能通、网关却仍走直连」
 		// 成了一种没有任何日志的静默失败（issue #136，群晖 + 代理出网的部署）。
 		// ProxyFromEnvironment 同时负责 NO_PROXY：内网/回环地址按环境变量绕过。
-		Proxy: http.ProxyFromEnvironment,
-		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
-		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
-		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
-		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
+	if http2Enabled.Load() {
+		// 标准库在 ForceAttemptHTTP2=true 且 TLSNextProto 为 nil 时按 ALPN 协商 h2。
+		// 注意不能同时留空映射：空映射会覆盖 ALPN 结果，h2 永远协商不出来。
+		tr.ForceAttemptHTTP2 = true
+	} else {
+		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
+		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
+		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
+		tr.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	}
+	return tr
 }
 
 // DirectRouteName 是账号级「强制直连」的保留线路名（issue #223）。
