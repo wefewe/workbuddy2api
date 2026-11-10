@@ -107,6 +107,11 @@ func TestClassify(t *testing.T) {
 		// hardRule 在 429 之前会误判 ErrHardCredit 硬冷却到次日 04:00，白扔号约 12h。
 		// 状态码是比关键词更权威的信号：真余额耗尽走 402，非 429 的 quota 措辞
 		// 仍归 hardRule（上方 {200,"quota exceeded"} 语义不变）。
+		// 6020「排队等待」是全局队列，不是账号级限流（issue #416）：429 + queue.waiting
+		// 必须单独分类，账号不冷却；换号不会改变队列位置。
+		{429, `{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`, ErrUpstreamQueue},
+		{429, `{"code": 6020, "msg": "queue.waiting.title"}`, ErrUpstreamQueue},
+		{200, `{"code":6020,"msg":"queue.waiting.title"}`, ErrNone},
 		{429, `quota exceeded`, ErrSoftRate},
 		{429, `{"code":1,"msg":"quota exceeded, please wait"}`, ErrSoftRate},
 		{429, `insufficient credits`, ErrSoftRate},

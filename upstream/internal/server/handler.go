@@ -1214,6 +1214,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrUpstreamQueue:
+			// 排队是全局队列，不是账号问题；仍返回 429 让客户端等待。
+			status = http.StatusTooManyRequests
+			code = "rate_limit_exceeded"
+			msg = "upstream model is queueing: peak-hour wait list, please retry later"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1374,6 +1379,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrUpstreamQueue:
+		// 排队是全局队列，与账号无关：不冷却、不计数、不禁用。本次请求仍由调用方
+		// 继续轮转（MaxRotate 兜住总次数），最终映射为 429 让客户端等待。
 	case upstream.ErrAuthRejected:
 		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
 		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），

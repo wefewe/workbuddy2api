@@ -58,6 +58,10 @@ const (
 	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
 	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
 	ErrAuthRejected
+	// ErrUpstreamQueue 上游「排队等待」（429 + 业务码 6020 / queue.waiting.title）
+	// 不是账号级限流：队列按账号等级全局共享，换号不会改变排队位置。账号不冷却、
+	// 不计数、不禁用；请求仍按 MaxRotate 轮转，最终以 429 返回让客户端等待。
+	ErrUpstreamQueue
 )
 
 func (k ErrKind) String() string {
@@ -94,6 +98,8 @@ func (k ErrKind) String() string {
 		return "fallback_model_missing"
 	case ErrAuthRejected:
 		return "auth_rejected"
+	case ErrUpstreamQueue:
+		return "upstream_queue"
 	case ErrClient:
 		return "client"
 	default:
@@ -602,6 +608,20 @@ func isToolCallMismatch(lower string) bool {
 		codeMarker(lower, "11148")
 }
 
+// IsUpstreamQueue 是否为「上游排队」而非账号限流：429 + 6020 / queue.waiting。
+//
+// 6020 的 queue_position 只随全局队列推进，换账号不会变好；把它当账号级 429
+// 会按 600s 冷却每个被轮到的号（任务现场 6 条请求冷 18 个健康号）。
+func IsUpstreamQueue(body string) bool {
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(body), "queue.waiting") {
+		return true
+	}
+	return hasBusinessCode(body, "6020")
+}
+
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 虽不含余额词、
@@ -644,6 +664,11 @@ func Classify(status int, body string) ErrKind {
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
+	}
+	// 6020「排队等待」不是账号级限流：队列全局共享，账号不该被冷却。必须判在
+	// 通用 429 兜底之前（issue #416）。只认 429，200 + 6020 文案不改变分类。
+	if status == http.StatusTooManyRequests && IsUpstreamQueue(body) {
+		return ErrUpstreamQueue
 	}
 	// status==429 先于 hardRule（fork-scan-absorb T-3）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardRule 先判会误归

@@ -665,6 +665,28 @@ func TestApplyErrorPolicyConversationIDMissingCools(t *testing.T) {
 // 保留有界冷却，但**冷却中的兜底探测不得翻倍**（这正是旧实现「越重试越冷」的根因，
 // 全池被推到 2h 封顶的元凶）。时长断言全部取自注入值，不依赖真实等待。
 // Classify→applyErrorPolicy 的接线由 TestChatSoftCoolsOnRateLimitBody 端到端覆盖。
+// TestApplyErrorPolicyUpstreamQueueDoesNotCool 6020 排队不是账号限流：不得冷却/
+// 计数/禁用（issue #416）。换号不会改变全局队列位置，罚号只会扩大伤害。
+func TestApplyErrorPolicyUpstreamQueueDoesNotCool(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	h.applyErrorPolicy("u1", upstream.ErrUpstreamQueue,
+		`{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`,
+		"kimi-k3.1-pro", &upstream.Error{Kind: upstream.ErrUpstreamQueue, Status: 429})
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("u1 missing")
+	}
+	if st.Cooling || st.Disabled {
+		t.Fatalf("排队不应冷却/禁用账号: %+v", st)
+	}
+	if st.SoftStreak != 0 {
+		t.Errorf("排队不应推进 soft_streak: %d", st.SoftStreak)
+	}
+}
+
 func TestApplyErrorPolicySoftRateNoDoubleWhenCooling(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})

@@ -52,5 +52,6 @@
   "0051-sanitize-tools-description.patch": "72ba6a0678171e77cf61d54c3de8b8ac4301d1bebe6fb78f88894837c1d4d2b4",
   "0052-sanitize-config-hot-reload.patch": "c8d5f0b332b41d76ed61ba0bcca1f858cc0801790238f6a06660ff9286250a0f",
   "0053-429-earliest-reset.patch": "a0874670b9a1a0fbd212262bc84590deaabe03b6913b8879ba9e24cde93e45eb",
-  "0054-http2-transport.patch": "900a01e5d662d995dd09393c35f83342596434fbb57722d8ae430b957df853a1"
+  "0054-http2-transport.patch": "900a01e5d662d995dd09393c35f83342596434fbb57722d8ae430b957df853a1",
+  "0055-queue-waiting.patch": "336cbb7798a3e9f9f5a11cd6ccf50548d6437e9b1f739f5c17b2d131c2a267a7"
 }

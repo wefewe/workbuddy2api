@@ -59,6 +59,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account session expired at upstream; the account is disabled until re-login"
 	case ErrAuthRejected:
 		return "account credential rejected by upstream (401); the gateway disables this account after repeated hits"
+	case ErrUpstreamQueue:
+		return "upstream model is queueing (peak-hour wait list); switching accounts does not help, retry after the queue clears"
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrModelBlocked:

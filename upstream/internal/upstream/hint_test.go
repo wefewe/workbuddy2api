@@ -27,6 +27,7 @@ func TestGatewayHintKindMap(t *testing.T) {
 		{"11115 prompt too long", ErrPromptTooLong, `{"code":11115,"msg":"prompt is too long"}`, "request context exceeds the model's limit; reduce history/message size"},
 		{"WAF 403", ErrWafBlock, `<html><head><title>403 Forbidden</title></head></html>`, "upstream WAF blocked the gateway; retry after the block window"},
 		{"429 soft rate", ErrSoftRate, `{"code":6004,"msg":"rate limited"}`, "rate limited by upstream; retry after reset"},
+		{"6020 queue", ErrUpstreamQueue, `{"code":6020,"msg":"queue.waiting.title"}`, "upstream model is queueing (peak-hour wait list); switching accounts does not help, retry after the queue clears"},
 		{"11140 account fault", ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"},
 		{"12153 session dead", ErrSessionDead, `{"code":12153,"msg":"Offline user session not found"}`, "account session expired at upstream; the account is disabled until re-login"},
 		{"402 hard credit", ErrHardCredit, `{"code":1,"msg":"余额不足"}`, "account credits exhausted at upstream; waiting for daily check-in to restore"},
@@ -132,9 +133,9 @@ func TestGatewayHintImageForms(t *testing.T) {
 // 字符串形态 + extError 深层 marker + displayMsg 文案家族。
 func TestGatewayHintMarkerTolerance(t *testing.T) {
 	variants := []string{
-		body11133,                                                     // 实测原始 body
-		`{"code":"11133","msg":"..."}`,                                // code 字符串形态
-		`{"extError":{"code":"model_param_invalid"}}`,                 // extError 深层 marker
+		body11133,                      // 实测原始 body
+		`{"code":"11133","msg":"..."}`, // code 字符串形态
+		`{"extError":{"code":"model_param_invalid"}}`,                                 // extError 深层 marker
 		`{"msg":"The request parameters do not meet the current model requirements"}`, // displayMsg en 文案
 	}
 	for _, v := range variants {
@@ -143,7 +144,7 @@ func TestGatewayHintMarkerTolerance(t *testing.T) {
 		}
 	}
 	v11135 := []string{
-		body11135,                                     // 实测原始 body
+		body11135, // 实测原始 body
 		`{"extError":{"code":"invalid_image_data"}}`, // extError 深层 marker
 	}
 	for _, v := range v11135 {
