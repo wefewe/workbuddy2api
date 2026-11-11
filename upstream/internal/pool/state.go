@@ -560,7 +560,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 
 // rateLimitedModelsLocked 构建单账号的限额台账行，从 modelCooldowns 遍历输出——
 // 每模型一行（含该模型的独立 until + 上游原始 resetAt），多模型同时 6004 全部展示。
-// 有效期判据 = 该模型的独立冷却 until 未过；随到期自然消失（与 /status 观感一致）。
+// 有效期判据 = 该模型的独立冷却尚未到期（ResetAt 或 Until 任一在未来）；随到期自然消失（与 /status 观感一致）。
 // 无模型级冷却（普通软冷却/硬冷却）→ nil（零回归）。调用方必须已持有 p.mu。
 func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedModel {
 	if len(e.modelCooldowns) == 0 {
@@ -575,10 +575,10 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 	rows := make([]RateLimitedModel, 0, len(models))
 	for _, m := range models {
 		mc := e.modelCooldowns[m]
-		if !mc.Until.IsZero() && now.Before(mc.Until) {
+		if mc.active(now) {
 			row := RateLimitedModel{
 				Model:  m,
-				Until:  mc.Until,
+				Until:  mc.effectiveUntil(now),
 				Reason: mc.Reason,
 			}
 			// 上游「将在 … 重置」的原始墙钟：无论是否被 soft_rate_max 截断都透出——

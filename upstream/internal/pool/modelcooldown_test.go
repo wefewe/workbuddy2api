@@ -2,6 +2,7 @@ package pool
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -182,17 +183,18 @@ func TestModelCooldownsPreservedByNoteSuccess(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsClearedByRevive 签到解冻（reviveCoolingLocked）→ 模型级 6004 冷却清零。
-func TestModelCooldownsClearedByRevive(t *testing.T) {
+// TestModelCooldownsRetainedOnRevive 签到解冻（reviveCoolingLocked）不得清除仍在活跃期的 6004 模型级冷却。
+func TestModelCooldownsRetainedOnRevive(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftForModel("u1", 600*time.Second, time.Now().Add(time.Hour), "glm-5.3", "6004")
+	reset := time.Now().Add(time.Hour)
+	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004")
 	p.ReenableIfCredits("u1", 500)
 	p.mu.RLock()
-	n := len(p.byUID["u1"].modelCooldowns)
+	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
 	p.mu.RUnlock()
-	if n != 0 {
-		t.Errorf("revive 后 modelCooldowns=%d want 0", n)
+	if !ok || !mc.active(time.Now()) {
+		t.Fatalf("revive 不得清除活跃的模型冷却: ok=%v, mc=%+v", ok, mc)
 	}
 }
 
@@ -771,5 +773,91 @@ func TestBlockModelBackoffPickSkips(t *testing.T) {
 	// 其他模型 u1 恢复可选（豁免保持）。
 	if got := p.PickExcludingForRealm(nil, "glm-5.3", ""); got == nil || got.UID != "u1" {
 		t.Fatalf("其他模型应豁免 u1, got %+v", got)
+	}
+}
+
+// TestModelCooldownUntilExpiredButResetAtFutureKeepsStatusAndCooldown
+// 当 6004 软退避截断时间 Until 已过，但上游真实重置时间 ResetAt 仍在未来时：
+// 1. pruneExpiredModelCooldowns 不得误删条目；
+// 2. modelCooled 仍判定为冷却中；
+// 3. /status 台账 RateLimitedModels 必须继续透出该模型，不得虚假恢复。
+func TestModelCooldownUntilExpiredButResetAtFutureKeepsStatusAndCooldown(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(10 * time.Millisecond) // 截断到极短，快速触发 Until 过期
+	reset := time.Now().Add(2 * time.Hour)  // 上游真实重置时间在 2 小时后
+	p.CooldownSoftForModel("u1", time.Millisecond, reset, "hy4free", "6004 model rate limit")
+
+	time.Sleep(30 * time.Millisecond) // 等 Until 过期
+	now := time.Now()
+
+	p.mu.Lock()
+	e := p.byUID["u1"]
+	e.pruneExpiredModelCooldowns(now)
+	p.mu.Unlock()
+
+	// 1. prune 之后 modelCooldowns 仍应保留
+	p.mu.RLock()
+	mc, ok := p.byUID["u1"].modelCooldowns["hy4free"]
+	p.mu.RUnlock()
+	if !ok {
+		t.Fatalf("Until 过期但 ResetAt 仍在未来时，prune 不得删除 modelCooldowns")
+	}
+	if mc.ResetAt.IsZero() || !mc.ResetAt.Equal(reset) {
+		t.Fatalf("ResetAt 应保持为上游真实时间 %v, got %v", reset, mc.ResetAt)
+	}
+
+	// 2. modelCooled 仍必须判定为处于冷却中
+	p.mu.RLock()
+	isCooled := e.modelCooled(now, "hy4free")
+	p.mu.RUnlock()
+	if !isCooled {
+		t.Fatalf("Until 过期但 ResetAt 在未来时，modelCooled 应仍为 true")
+	}
+
+	// 3. Status 台账必须继续透出
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatalf("status missing")
+	}
+	if len(st.RateLimitedModels) != 1 {
+		t.Fatalf("Until 过期但 ResetAt 在未来时，/status 应继续包含台账行，got %+v", st.RateLimitedModels)
+	}
+	row := st.RateLimitedModels[0]
+	if row.Model != "hy4free" {
+		t.Errorf("model=%q want hy4free", row.Model)
+	}
+	if !row.ResetAt.Equal(reset) {
+		t.Errorf("row.ResetAt=%v want %v", row.ResetAt, reset)
+	}
+	if row.Until.Before(now) {
+		t.Errorf("row.Until=%v 应延伸到未来（有效截止），不得早于 now=%v", row.Until, now)
+	}
+}
+
+// TestModelCooldownPersistWhenUntilExpiredButResetAtFuture
+// 持久化往返：Until 已过但 ResetAt 仍在未来时，落盘和恢复均不得丢弃条目。
+func TestModelCooldownPersistWhenUntilExpiredButResetAtFuture(t *testing.T) {
+	fp := filepath.Join(t.TempDir(), "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(10 * time.Millisecond)
+	reset := time.Now().Add(3 * time.Hour)
+	p.CooldownSoftForModel("u1", time.Millisecond, reset, "hy4free", "6004 model rate limit")
+
+	time.Sleep(30 * time.Millisecond) // 等 Until 过期
+	p.Flush()
+
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+
+	p2.mu.RLock()
+	mc, ok := p2.byUID["u1"].modelCooldowns["hy4free"]
+	p2.mu.RUnlock()
+	if !ok {
+		t.Fatalf("重启后 Until 已过期但 ResetAt 在未来的 modelCooldowns 应恢复")
+	}
+	if !mc.ResetAt.Equal(reset) {
+		t.Fatalf("恢复后的 ResetAt 应为 %v, got %v", reset, mc.ResetAt)
 	}
 }

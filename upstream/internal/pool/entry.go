@@ -245,7 +245,7 @@ func (e *entry) modelCooled(now time.Time, reqModel string) bool {
 	if !ok {
 		return false
 	}
-	return !mc.Until.IsZero() && now.Before(mc.Until)
+	return mc.active(now)
 }
 
 // healthyForModel 报告账号对指定 model 是否可选（含 6004 模型级独立冷却判定）。
@@ -305,7 +305,7 @@ func (e *entry) pruneExpiredModelCooldowns(now time.Time) {
 		return
 	}
 	for m, mc := range e.modelCooldowns {
-		if mc.Until.IsZero() || !now.Before(mc.Until) {
+		if !mc.active(now) {
 			delete(e.modelCooldowns, m)
 		}
 	}
@@ -459,6 +459,27 @@ type modelCooldown struct {
 	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同 modelCost 口径：
 	// 重启后从 6h 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
 	Hits int
+}
+
+// active 报告该模型的独立冷却是否仍在生效（未到恢复时刻）。
+// 只要上游权威重置墙钟 ResetAt 在未来，或冷却截止 Until 在未来，即视为仍在冷却。
+func (mc modelCooldown) active(now time.Time) bool {
+	if !mc.ResetAt.IsZero() && now.Before(mc.ResetAt) {
+		return true
+	}
+	return !mc.Until.IsZero() && now.Before(mc.Until)
+}
+
+// effectiveUntil 返回当前活跃状态下对外展示的有效截止时间。
+// 若 Until 已随软退避窗口过去但 ResetAt 仍在未来，有效截止延伸到 ResetAt；
+// 否则返回 Until。
+func (mc modelCooldown) effectiveUntil(now time.Time) time.Time {
+	if !mc.ResetAt.IsZero() && now.Before(mc.ResetAt) {
+		if mc.Until.IsZero() || !now.Before(mc.Until) {
+			return mc.ResetAt
+		}
+	}
+	return mc.Until
 }
 
 // stateFile 持久化格式。

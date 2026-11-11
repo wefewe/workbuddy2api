@@ -129,9 +129,7 @@ func TestTransitionSessionDeadDisableClearsCooling(t *testing.T) {
 }
 
 // TestTransitionReviveClearsCoolingKeepsBreaker reviveCoolingLocked（签到解冻）语义：
-// 清冷却域（until/coolKind/reason/softStreak/modelCooldowns）+ 更新 credits，不动熔断。
-// 既有单维度测试已各自锁定 reason/softStreak/modelCooldowns，本用例一次性断言完整
-// 字段集，锁定迁移原语对冷却域/熔断域的处置永远一致。
+// 清账号级冷却域（until/coolKind/reason/softStreak）+ 更新 credits，不动熔断与活跃模型限流。
 func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -149,8 +147,8 @@ func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
 		t.Errorf("revive 后 credits=%d want 700", st.Credits)
 	}
 	until, kind, reason, streak, mc := coolingDomain(t, p, "u1")
-	if !until.IsZero() || kind != 0 || reason != "" || streak != 0 || mc != 0 {
-		t.Errorf("revive 应清冷却域：until=%v kind=%v reason=%q streak=%d modelCooldowns=%d",
+	if !until.IsZero() || kind != 0 || reason != "" || streak != 0 || mc != 1 {
+		t.Errorf("revive 应清账号级冷却域并保留活跃模型冷却：until=%v kind=%v reason=%q streak=%d modelCooldowns=%d",
 			until, kind, reason, streak, mc)
 	}
 	if bt, ok := p.breakerUntil("u1"); !ok || bt.IsZero() {

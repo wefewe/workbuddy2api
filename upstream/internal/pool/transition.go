@@ -29,15 +29,17 @@ package pool
 
 import "time"
 
-// clearCoolingLocked 清冷却域：until/coolKind/softStreak/modelCooldowns 全归零，
+// clearCoolingLocked 清冷却域：until/coolKind/softStreak 全归零，
 // reason 一并清空。熔断器（fails/retryCount/breakerUntil）不属冷却域，不动。
+// 注意：活跃的模型级冷却（如 6004、11102）未到恢复时刻前仍有效，
+// 签到获得积分或解冻账号不得抹除上游真实模型的频率限制（仅惰性清理已过期条目）。
 // 调用方必须已持有 p.mu。
 func (e *entry) clearCoolingLocked() {
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
 	e.softStreak = 0
-	e.modelCooldowns = nil // 冷却域清零时一并清模型级独立冷却（模型豁免随之消失）
+	e.pruneExpiredModelCooldowns(time.Now())
 }
 
 // disableLocked 禁用迁移：置 disabled 并清冷却域（禁用是比冷却更强的不可用终态）。
@@ -51,6 +53,7 @@ func (e *entry) clearCoolingLocked() {
 // 熔断观测仍有效，不应被禁用覆盖。
 func (p *Pool) disableLocked(e *entry, reason string) {
 	e.clearCoolingLocked()
+	e.modelCooldowns = nil
 	e.disabled = true
 	e.reason = reason
 	p.dirty.Store(true)

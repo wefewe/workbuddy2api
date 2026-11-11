@@ -197,19 +197,20 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		if s.DegradeUntil != nil && !s.DegradeUntil.IsZero() && now.Before(*s.DegradeUntil) {
 			e.degradeUntil = *s.DegradeUntil
 		}
-		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
+		// 恢复 modelCooldowns，惰性过滤已过期条目（ResetAt 或 Until 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
 		if len(s.ModelCooldowns) > 0 {
 			e.modelCooldowns = make(map[string]modelCooldown, len(s.ModelCooldowns))
 			for m, smc := range s.ModelCooldowns {
-				if smc.Until.IsZero() || !now.Before(smc.Until) {
-					continue // 过期/零值丢弃
-				}
-				e.modelCooldowns[m] = modelCooldown{
+				mc := modelCooldown{
 					Until:   smc.Until,
 					ResetAt: smc.ResetAt,
 					Reason:  smc.Reason,
 				}
+				if !mc.active(now) {
+					continue // 过期/零值丢弃
+				}
+				e.modelCooldowns[m] = mc
 			}
 			if len(e.modelCooldowns) == 0 {
 				e.modelCooldowns = nil
@@ -356,7 +357,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		if len(e.modelCooldowns) > 0 {
 			mcs = make(map[string]stateModelCooldown, len(e.modelCooldowns))
 			for m, mc := range e.modelCooldowns {
-				if mc.Until.IsZero() || !now.Before(mc.Until) {
+				if !mc.active(now) {
 					continue // 已过期：不落盘（惰性清理）
 				}
 				mcs[m] = stateModelCooldown{

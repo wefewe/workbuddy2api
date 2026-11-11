@@ -57,10 +57,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
-		// 非模型级冷却入口：清空 6004 模型级独立冷却表（modelCooldowns），
-		// 避免上一次模型级限流的模型豁免泄漏到本次**账号级**限流上
-		// （否则换模型请求会错误绕过本次冷却）。
-		e.modelCooldowns = nil
+		// healthyForModel 优先判定账号级 healthy(now)，账号级冷却期间全模型天然不可选。
+		// 模型级限流（6004/11102）未到恢复时间前继续保留，账号级冷却过后恢复拦截。
+		e.pruneExpiredModelCooldowns(time.Now())
 		p.dirty.Store(true)
 	}
 }
@@ -245,7 +244,8 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		}
 		e.coolKind = CoolSoft
 		e.reason = reason
-		e.modelCooldowns = nil // 账号级软冷却：清空模型豁免（切模型不绕过）
+		// 账号级软冷却期间 healthy 整体短路，保留活跃的模型级限流直至其恢复时刻
+		e.pruneExpiredModelCooldowns(now)
 		p.dirty.Store(true)
 	}
 }
