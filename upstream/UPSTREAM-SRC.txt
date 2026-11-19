@@ -1,1 +1,1 @@
-https://github.com/ithtelab/workbuddy-manager/releases/download/v2.11.19/workbuddy-manager-v2.11.19.tar.gz
+https://github.com/ithtelab/workbuddy-manager/releases/download/v2.11.20/workbuddy-manager-v2.11.20.tar.gz
